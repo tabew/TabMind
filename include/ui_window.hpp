@@ -53,6 +53,11 @@ private:
     HWND btn_reload_plugins_ = nullptr;
     HWND btn_open_plugin_dir_ = nullptr;
 
+    // --- 二级弹窗入口（点开才显示，主界面保持清爽）---
+    HWND btn_advanced_ = nullptr;
+    HWND btn_plugins_ = nullptr;
+    HWND btn_help_ = nullptr;
+
     // --- 操作按钮 ---
     HWND btn_toggle_bot_ = nullptr;
     HWND btn_save_config_ = nullptr;
@@ -76,6 +81,7 @@ private:
     HFONT font_body_ = nullptr;
     HFONT font_body_bold_ = nullptr;
     HFONT font_code_ = nullptr;
+    HFONT font_log_ = nullptr;
     HFONT font_small_ = nullptr;
 
     HBRUSH brush_win_bg_ = nullptr;

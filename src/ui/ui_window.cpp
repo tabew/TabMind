@@ -1,4 +1,5 @@
 #include "ui_window.hpp"
+#include "ui_dialogs.hpp"
 #include "plugin_manager.hpp"
 #include <dwmapi.h>
 #include <uxtheme.h>
@@ -20,6 +21,9 @@
 #define IDC_BTN_CLEAR_LOG        1004
 #define IDC_BTN_RELOAD_PLUGINS   1005
 #define IDC_BTN_OPEN_PLUGIN_DIR  1006
+#define IDC_BTN_ADVANCED         1007
+#define IDC_BTN_PLUGIN_MGR       1008
+#define IDC_BTN_HELP             1009
 
 #define IDC_EDIT_API_KEY         1101
 #define IDC_EDIT_BASE_URL        1102
@@ -97,6 +101,20 @@ static void draw_rounded_rect(HDC hdc, const RECT& rc, int radius, COLORREF fill
     DeleteObject(hPen);
 }
 
+// 日志标题行右侧三个「点开才显示」的工具按钮布局。
+// WM_PAINT（算标题可用宽度）与 relayout_controls（摆按钮）共用，避免两处各算一套导致错位。
+static void compute_tools_layout(int client_w, int& tx0, int& tool_w) {
+    const int right_x = 605;
+    const int tool_gap = 8;
+    int right_w = client_w - right_x - 25;
+    if (right_w < 300) right_w = 300;
+    tool_w = (right_w - tool_gap * 2) / 3;
+    if (tool_w < 88) tool_w = 88;
+    if (tool_w > 118) tool_w = 118;
+    tx0 = right_x + right_w - (tool_w * 3 + tool_gap * 2);
+    if (tx0 < right_x) tx0 = right_x;
+}
+
 MainWindow::MainWindow() {}
 
 MainWindow::~MainWindow() {
@@ -105,6 +123,7 @@ MainWindow::~MainWindow() {
     if (font_body_) DeleteObject(font_body_);
     if (font_body_bold_) DeleteObject(font_body_bold_);
     if (font_code_) DeleteObject(font_code_);
+    if (font_log_) DeleteObject(font_log_);
     if (font_small_) DeleteObject(font_small_);
 
     if (brush_win_bg_) DeleteObject(brush_win_bg_);
@@ -143,6 +162,13 @@ void MainWindow::init_gdi_resources() {
     font_code_ = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
         DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
         FIXED_PITCH | FF_MODERN, L"Consolas");
+
+    // 日志专用字体：必须能直接渲染中文。
+    // 之前用 Consolas（纯西文等宽），中文要走字体回退，回退字体的行高与
+    // 控件按主字体计算的行高不一致，滚动时就会出现文字上下重叠/被裁切。
+    font_log_ = CreateFontW(15, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
+        DEFAULT_PITCH | FF_SWISS, L"Microsoft YaHei UI");
 
     brush_win_bg_ = CreateSolidBrush(Theme::WinBg);
     brush_card_bg_ = CreateSolidBrush(Theme::CardBg);
@@ -362,11 +388,27 @@ void MainWindow::init_controls(HWND hwnd) {
         1035, 65, 130, 50, hwnd, (HMENU)IDC_BTN_CLEAR_LOG, h_instance_, NULL);
     SetWindowSubclass(btn_clear_log_, MainWindow::button_subclass_proc, IDC_BTN_CLEAR_LOG, 0);
 
+    // 二级弹窗入口（点开才显示的设置窗口），默认靠右排列，窗口变大时在 relayout 里跟随
+    btn_advanced_ = CreateWindowW(L"BUTTON", L"⚙ 高级设置",
+        WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        805, 122, 118, 30, hwnd, (HMENU)IDC_BTN_ADVANCED, h_instance_, NULL);
+    SetWindowSubclass(btn_advanced_, MainWindow::button_subclass_proc, IDC_BTN_ADVANCED, 0);
+
+    btn_plugins_ = CreateWindowW(L"BUTTON", L"🧩 插件管理",
+        WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        931, 122, 118, 30, hwnd, (HMENU)IDC_BTN_PLUGIN_MGR, h_instance_, NULL);
+    SetWindowSubclass(btn_plugins_, MainWindow::button_subclass_proc, IDC_BTN_PLUGIN_MGR, 0);
+
+    btn_help_ = CreateWindowW(L"BUTTON", L"❓ 使用说明",
+        WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
+        1057, 122, 118, 30, hwnd, (HMENU)IDC_BTN_HELP, h_instance_, NULL);
+    SetWindowSubclass(btn_help_, MainWindow::button_subclass_proc, IDC_BTN_HELP, 0);
+
     edit_log_ = CreateWindowExW(0, L"EDIT", L"",
-        WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL,
+        WS_VISIBLE | WS_CHILD | ES_MULTILINE | ES_AUTOVSCROLL | ES_READONLY | WS_VSCROLL | ES_NOHIDESEL,
         605, 155, 560, 636, hwnd, (HMENU)IDC_EDIT_LOG, h_instance_, NULL);
     SendMessageW(edit_log_, EM_LIMITTEXT, 0, 0); // 取消 Win32 Edit 控件 32KB/64KB 字符限制
-    SendMessageW(edit_log_, WM_SETFONT, (WPARAM)font_code_, TRUE);
+    SendMessageW(edit_log_, WM_SETFONT, (WPARAM)font_log_, TRUE);
 }
 
 void MainWindow::relayout_controls(int width, int height) {
@@ -386,6 +428,14 @@ void MainWindow::relayout_controls(int width, int height) {
     SetWindowPos(btn_toggle_bot_, NULL, right_x, 65, btn_toggle_w, 50, SWP_NOZORDER);
     SetWindowPos(btn_clear_log_, NULL, right_x + btn_toggle_w + 10, 65, 130, 50, SWP_NOZORDER);
     SetWindowPos(edit_log_, NULL, right_x, 155, right_w, log_h, SWP_NOZORDER);
+
+    // 三个弹窗入口跟随窗口宽度右对齐（与 WM_PAINT 里的标题裁剪共用同一套计算）
+    int tx0 = 0, tool_w = 118;
+    compute_tools_layout(width, tx0, tool_w);
+    const int gap = 8;
+    SetWindowPos(btn_advanced_, NULL, tx0, 122, tool_w, 30, SWP_NOZORDER);
+    SetWindowPos(btn_plugins_, NULL, tx0 + tool_w + gap, 122, tool_w, 30, SWP_NOZORDER);
+    SetWindowPos(btn_help_, NULL, tx0 + (tool_w + gap) * 2, 122, tool_w, 30, SWP_NOZORDER);
 
     InvalidateRect(h_wnd_, NULL, TRUE);
 }
@@ -596,14 +646,29 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         }
 
         std::wstring wmsg = wss.str();
-        int len = GetWindowTextLengthW(self->edit_log_);
+        HWND log = self->edit_log_;
+
+        // 追加期间先关掉重绘：避免多次 EM_REPLACESEL/裁剪触发中间态重绘，
+        // 造成旧行残留、滚动时看起来「文字重合」。
+        SendMessageW(log, WM_SETREDRAW, FALSE, 0);
+
+        int len = GetWindowTextLengthW(log);
         if (len > 150000) {
-            SendMessageW(self->edit_log_, EM_SETSEL, 0, 80000);
-            SendMessageW(self->edit_log_, EM_REPLACESEL, FALSE, (LPARAM)L"");
-            len = GetWindowTextLengthW(self->edit_log_);
+            SendMessageW(log, EM_SETSEL, 0, 80000);
+            SendMessageW(log, EM_REPLACESEL, FALSE, (LPARAM)L"");
+            len = GetWindowTextLengthW(log);
         }
-        SendMessageW(self->edit_log_, EM_SETSEL, len, len);
-        SendMessageW(self->edit_log_, EM_REPLACESEL, FALSE, (LPARAM)wmsg.c_str());
+        SendMessageW(log, EM_SETSEL, len, len);
+        SendMessageW(log, EM_REPLACESEL, FALSE, (LPARAM)wmsg.c_str());
+
+        // 插入点留在末尾并滚到底，再统一重绘一次（顺序很重要，否则会停在中间位置）
+        int new_len = GetWindowTextLengthW(log);
+        SendMessageW(log, EM_SETSEL, new_len, new_len);
+        SendMessageW(log, EM_SCROLLCARET, 0, 0);
+
+        SendMessageW(log, WM_SETREDRAW, TRUE, 0);
+        InvalidateRect(log, nullptr, TRUE);
+        UpdateWindow(log);
         return 0;
     }
 
@@ -626,8 +691,9 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_GETMINMAXINFO: {
         MINMAXINFO* mmi = (MINMAXINFO*)lParam;
+        // 最小高度要能完整容纳左栏（含插件卡片与底部按钮），否则控件会被裁掉
         mmi->ptMinTrackSize.x = 900;
-        mmi->ptMinTrackSize.y = 700;
+        mmi->ptMinTrackSize.y = 840;
         return 0;
     }
 
@@ -671,8 +737,12 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         RECT rcObTitle = { 38, 406, 560, 432 };
         DrawTextW(hdc, L"⚡  OneBot / QQ 接入配置", -1, &rcObTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
 
-        RECT rcLogTitle = { 605, 126, rc.right - 20, 152 };
-        DrawTextW(hdc, L"📋  实时运行日志与交互流", -1, &rcLogTitle, DT_LEFT | DT_TOP | DT_SINGLELINE);
+        // 日志标题右侧要给三个工具按钮留位置，窗口变窄时标题自动省略
+        int tx0 = 0, tool_w = 118;
+        compute_tools_layout(rc.right, tx0, tool_w);
+        RECT rcLogTitle = { 605, 126, tx0 - 14, 152 };
+        DrawTextW(hdc, L"📋  实时运行日志与交互流", -1, &rcLogTitle,
+                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
 
         EndPaint(hwnd, &ps);
         return 0;
@@ -694,6 +764,19 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
             const wchar_t* txt = self->is_bot_running_ ? L"🛑 停止运行中的机器人" : L"🚀 启动 AI 智能机器人";
             DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            return TRUE;
+        }
+
+        // 日志标题行的小工具按钮：点开二级窗口
+        if (dis->CtlID == IDC_BTN_ADVANCED || dis->CtlID == IDC_BTN_PLUGIN_MGR || dis->CtlID == IDC_BTN_HELP) {
+            COLORREF bg = (dis->itemState & ODS_SELECTED) ? RGB(219, 234, 254) : Theme::CardBg;
+            draw_rounded_rect(dis->hDC, dis->rcItem, 6, bg, Theme::CardBorder);
+            SetBkMode(dis->hDC, TRANSPARENT);
+            SetTextColor(dis->hDC, Theme::PrimaryBlue);
+            SelectObject(dis->hDC, self->font_small_);
+            wchar_t text[64];
+            GetWindowTextW(dis->hwndItem, text, 64);
+            DrawTextW(dis->hDC, text, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             return TRUE;
         }
 
@@ -751,6 +834,20 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         case IDC_BTN_OPEN_PLUGIN_DIR:
             CreateDirectoryW(L"plugins", NULL);
             ShellExecuteW(NULL, L"open", L"plugins", NULL, NULL, SW_SHOW);
+            break;
+        case IDC_BTN_ADVANCED:
+            if (ui_dialogs::show_advanced_settings(hwnd, self->config_, self->h_instance_)) {
+                self->config_.save_to_file("config.json");
+                self->update_status_ui();
+                self->log("√ 高级设置已保存（温度 / 记忆 / 视觉 / 行为开关）");
+            }
+            break;
+        case IDC_BTN_PLUGIN_MGR:
+            ui_dialogs::show_plugin_manager(hwnd, self->h_instance_);
+            self->refresh_plugin_ui();
+            break;
+        case IDC_BTN_HELP:
+            ui_dialogs::show_help(hwnd, self->h_instance_);
             break;
         }
         return 0;

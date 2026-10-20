@@ -27,6 +27,9 @@
     <ClInclude Include="include\bot_client.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\ui_dialogs.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\ui_window.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
@@ -48,6 +51,9 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="src\core\bot_client.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="src\ui\ui_dialogs.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="src\ui\ui_window.cpp">
