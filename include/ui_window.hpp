@@ -136,7 +136,7 @@ private:
     void apply_theme(int index, bool persist);
 
     void init_sidebar(HWND hwnd);
-    void paint_main(HDC hdc, const RECT& rc);
+    void paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint);
     int sidebar_row_at(POINT pt) const;
 
     void create_module_windows();
@@ -148,6 +148,7 @@ private:
     RECT default_module_rect(int kind) const;
     void clamp_module(int kind);
     void save_layout();
+    void set_card_redraw(int kind, bool on);   // 拖动时冻结卡片重绘
 
     void load_config_to_ui();
     void save_ui_to_config();

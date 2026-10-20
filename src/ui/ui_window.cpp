@@ -323,11 +323,17 @@ void MainWindow::init_sidebar(HWND hwnd) {
 // ---------------------------------------------------------------------------
 // 主窗口绘制（左侧菜单 + 右侧工作区背景）
 // ---------------------------------------------------------------------------
-void MainWindow::paint_main(HDC hdc, const RECT& rc) {
+void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
     const ThemePalette& t = theme();
 
-    // 工作区
-    FillRect(hdc, &rc, brush_win_bg_);
+    // 关键：只重绘无效区域。拖动卡片时脏矩形只有工作区里那一条，
+    // 用整块客户区重绘会导致每次鼠标移动都把整条侧栏（圆角+文字）重新画一遍，这就是卡顿来源。
+    FillRect(hdc, &rcPaint, brush_win_bg_);
+
+    // 侧栏与脏矩形不相交时直接返回
+    RECT side = { 0, 0, Lay::SidebarW, rc.bottom };
+    RECT inter = {};
+    if (!IntersectRect(&inter, &side, &rcPaint)) return;
 
     // 侧栏
     RECT rcSide = { 0, 0, Lay::SidebarW, rc.bottom };
@@ -650,6 +656,31 @@ void MainWindow::clamp_module(int kind) {
     }
 }
 
+void MainWindow::set_card_redraw(int kind, bool on) {
+    if (kind < 0 || kind >= MOD_COUNT) return;
+    HWND c = mod_wnd_[kind];
+
+    if (on) {
+        // 解冻必须先子控件、后卡片，否则卡片重绘时子控件还处于冻结态，画不出来
+        for (HWND h : mod_ctl_[kind]) {
+            if (h) SendMessageW(h, WM_SETREDRAW, TRUE, 0);
+        }
+        if (c) {
+            SendMessageW(c, WM_SETREDRAW, TRUE, 0);
+            // 一次性整体重绘，把拖动期间攒下的区域补齐
+            RedrawWindow(c, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+            InvalidateRect(h_wnd_, NULL, TRUE);
+        }
+        return;
+    }
+
+    // 冻结：先卡片、后子控件
+    if (c) SendMessageW(c, WM_SETREDRAW, FALSE, 0);
+    for (HWND h : mod_ctl_[kind]) {
+        if (h) SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+    }
+}
+
 void MainWindow::save_layout() {
     config_.ui.modules.clear();
     for (int i = 0; i < MOD_COUNT; ++i) {
@@ -770,7 +801,7 @@ void MainWindow::relayout_module(int kind) {
 void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
     const ThemePalette& t = theme();
 
-    // 卡片外圈：先用背景色填满（圆角外露的就是它）
+    // 只填无效区，减少拖动后的重绘开销
     FillRect(hdc, &rc, brush_win_bg_);
     RECT card = rc;
     ui_fill_round(hdc, card, 12, t.card_bg, t.border);
@@ -1111,7 +1142,7 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         HDC hdc = BeginPaint(hwnd, &ps);
         RECT rc;
         GetClientRect(hwnd, &rc);
-        if (self) self->paint_main(hdc, rc);
+        if (self) self->paint_main(hdc, rc, ps.rcPaint);
         EndPaint(hwnd, &ps);
         return 0;
     }
@@ -1365,6 +1396,9 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         self->bring_to_front(ctx->kind);
         SetCapture(hwnd);
         SetCursor(LoadCursor(NULL, self->drag_mode_ == 2 ? IDC_SIZENWSE : IDC_SIZEALL));
+        // 拖动期间冻结卡片及其子控件的重绘：卡片内含十几个控件，每次鼠标移动
+        // 都让它们重画一遍就是卡顿的直接原因；松手时统一重绘一次即可
+        self->set_card_redraw(ctx->kind, false);
         return 0;
     }
 
@@ -1419,8 +1453,10 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
     case WM_LBUTTONUP: {
         if (!self || self->drag_mode_ == 0) break;
         ReleaseCapture();
+        int id = self->drag_mod_;
         self->drag_mode_ = 0;
         self->drag_mod_ = -1;
+        self->set_card_redraw(id, true);
         self->save_layout();
         InvalidateRect(hwnd, NULL, FALSE);
         return 0;
