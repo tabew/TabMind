@@ -12,8 +12,10 @@
 
 #define WM_USER_LOG (WM_USER + 101)
 #define WM_USER_STATUS_UPDATE (WM_USER + 102)
+#define WM_USER_MODULE_CLOSED (WM_USER + 103)   // 模块窗口被关闭（通知菜单刷新）
 
-// 主窗口：顶栏（品牌 + 主题/布局）+ 可自由拖拽/缩放的模块看板
+// TabMind 主窗口 = 一个小型「菜单」，功能块各自独立成窗口。
+// 每个窗口只绘制自己那一块，拖动/缩放交给系统，不再整窗重绘，因此不会卡。
 class MainWindow {
 public:
     static MainWindow& get_instance();
@@ -22,75 +24,86 @@ public:
     void run_message_loop();
     void log(const std::string& message);
 
+    // ---- 供模块窗口使用 ----
+    AppConfig& config() { return config_; }
+    HFONT font_body() const { return font_body_; }
+    HFONT font_body_bold() const { return font_body_bold_; }
+    HFONT font_small() const { return font_small_; }
+    HFONT font_h2() const { return font_h2_; }
+    HBRUSH brush_card() const { return brush_card_bg_; }
+    HBRUSH brush_field() const { return brush_field_bg_; }
+    HBRUSH brush_log() const { return brush_log_bg_; }
+    bool is_running() const { return is_bot_running_; }
+    int msg_count() const { return total_msg_handled_; }
+    bool log_is_riched() const { return log_is_riched_; }
+    HWND log_edit() const { return edit_log_; }
+
+    void action_toggle_bot();
+    void action_save_config();
+    void action_test_api();
+    void refresh_plugin_ui();
+
 private:
     MainWindow();
     ~MainWindow();
 
-    // ---------------- 模块定义 ----------------
     enum ModuleId {
         MOD_STATUS = 0,   // 运行状态
         MOD_AI,           // AI 接口配置
         MOD_QQ,           // OneBot / QQ 接入
-        MOD_PLUGIN,       // 插件
+        MOD_PLUGIN,       // 扩展插件
         MOD_ACTION,       // 快捷操作
         MOD_LOG,          // 运行日志
         MOD_COUNT
     };
 
+    struct ModuleCtx {
+        MainWindow* owner = nullptr;
+        int kind = 0;
+    };
+
     HINSTANCE h_instance_ = nullptr;
-    HWND h_wnd_ = nullptr;
+    HWND h_wnd_ = nullptr;                       // 菜单窗口
 
-    // ---------------- 顶栏 ----------------
-    HWND btn_theme_ = nullptr;    // 切换主题
-    HWND btn_layout_ = nullptr;   // 布局菜单
+    HWND btn_theme_ = nullptr;
+    int hover_row_ = -1;
 
-    // ---------------- 模块状态 ----------------
-    RECT mod_rc_[MOD_COUNT] = {};
-    bool mod_visible_[MOD_COUNT] = {};
+    HWND mod_wnd_[MOD_COUNT] = {};
+    bool mod_open_[MOD_COUNT] = {};
+    RECT mod_rect_[MOD_COUNT] = {};
     std::vector<HWND> mod_ctl_[MOD_COUNT];
-    std::vector<int> mod_order_;   // 绘制/命中的 z 序（末尾=最上层）
 
-    // 拖拽状态
-    int drag_mode_ = 0;           // 0 无 / 1 移动 / 2 缩放
-    int drag_mod_ = -1;
-    POINT drag_start_ = {};
-    RECT drag_rc0_ = {};
-
-    // ---------------- AI 配置控件 ----------------
+    // AI
     HWND edit_api_key_ = nullptr;
     HWND edit_base_url_ = nullptr;
     HWND combo_model_ = nullptr;
     HWND edit_system_prompt_ = nullptr;
     HWND edit_max_tokens_ = nullptr;
     HWND edit_history_rounds_ = nullptr;
-
-    // ---------------- OneBot 控件 ----------------
+    // OneBot
     HWND edit_ws_url_ = nullptr;
     HWND edit_bot_qq_ = nullptr;
     HWND edit_access_token_ = nullptr;
     HWND edit_prefixes_ = nullptr;
     HWND chk_group_require_at_ = nullptr;
     HWND edit_at_exempt_ = nullptr;
-
-    // ---------------- 插件 / 操作控件 ----------------
+    // 插件
     HWND label_plugin_summary_ = nullptr;
     HWND btn_reload_plugins_ = nullptr;
     HWND btn_open_plugin_dir_ = nullptr;
     HWND btn_plugin_mgr_ = nullptr;
-
+    // 操作
     HWND btn_toggle_bot_ = nullptr;
     HWND btn_save_config_ = nullptr;
     HWND btn_test_api_ = nullptr;
     HWND btn_advanced_ = nullptr;
     HWND btn_help_ = nullptr;
-    HWND btn_reset_layout_ = nullptr;
-
-    // ---------------- 日志 ----------------
+    // 日志
     HWND edit_log_ = nullptr;
     HWND btn_clear_log_ = nullptr;
     bool log_is_riched_ = false;
 
-    // ---------------- 运行状态 ----------------
+    // 运行状态
     AppConfig config_;
     std::unique_ptr<BotClient> bot_client_;
     bool is_bot_running_ = false;
@@ -98,46 +111,44 @@ private:
     std::mutex log_mutex_;
     std::vector<std::string> pending_logs_;
 
-    std::set<int> hovered_;   // owner-draw 悬停态
+    std::set<int> hovered_;
 
-    // ---------------- GDI ----------------
+    // GDI
     HFONT font_brand_ = nullptr;
     HFONT font_h2_ = nullptr;
     HFONT font_body_ = nullptr;
     HFONT font_body_bold_ = nullptr;
     HFONT font_small_ = nullptr;
     HFONT font_log_ = nullptr;
-
     HBRUSH brush_win_bg_ = nullptr;
     HBRUSH brush_card_bg_ = nullptr;
     HBRUSH brush_field_bg_ = nullptr;
     HBRUSH brush_log_bg_ = nullptr;
-    int applied_theme_ = -1;
 
-    // ---------------- 内部方法 ----------------
     void init_gdi_resources();
     void apply_theme(int index, bool persist);
-    void init_controls(HWND hwnd);
 
-    void default_layout(int width, int height);
-    void load_layout();
-    void save_layout();
-    void relayout_all();
-    void relayout_module(int id);
-    int module_at(POINT pt, bool& on_grip) const;
-    void paint_module(HDC hdc, int id);
-    static const wchar_t* module_title(int id);
-    void show_layout_menu();
+    void init_launcher(HWND hwnd);
+    void paint_launcher(HDC hdc, const RECT& rc);
+    int launcher_row_at(POINT pt) const;
+    void toggle_module(int kind);
+
+    void create_module_windows();
+    void create_module(int kind);
+    void show_module(int kind, bool open);
+    void relayout_module(int kind);
+    void paint_module_window(int kind, HDC hdc, const RECT& rc);
+    RECT default_module_rect(int kind) const;
 
     void load_config_to_ui();
     void save_ui_to_config();
-    void toggle_bot_state();
-    void test_api_connection();
     void update_status_ui();
-    void refresh_plugin_ui();
     void append_log_text(const std::wstring& text, const std::string& raw_for_scan);
 
-    static LRESULT CALLBACK window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static const wchar_t* module_title(int kind);
+
+    static LRESULT CALLBACK launcher_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK button_subclass_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                                                  UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
 };
