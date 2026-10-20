@@ -12,10 +12,10 @@
 
 #define WM_USER_LOG (WM_USER + 101)
 #define WM_USER_STATUS_UPDATE (WM_USER + 102)
-#define WM_USER_MODULE_CLOSED (WM_USER + 103)   // 模块窗口被关闭（通知菜单刷新）
 
-// TabMind 主窗口 = 一个小型「菜单」，功能块各自独立成窗口。
-// 每个窗口只绘制自己那一块，拖动/缩放交给系统，不再整窗重绘，因此不会卡。
+// 单窗口 + 左侧菜单 + 右侧嵌入式卡片。
+// 每个功能块是一个 WS_CHILD 子窗口：拖动只移动该子窗口，父窗口不重绘，
+// 所以既有「自由摆放」的手感，又不会像整窗重绘那样卡。
 class MainWindow {
 public:
     static MainWindow& get_instance();
@@ -24,12 +24,13 @@ public:
     void run_message_loop();
     void log(const std::string& message);
 
-    // ---- 供模块窗口使用 ----
+    // ---- 供模块子窗口使用 ----
     AppConfig& config() { return config_; }
     HFONT font_body() const { return font_body_; }
     HFONT font_body_bold() const { return font_body_bold_; }
     HFONT font_small() const { return font_small_; }
     HFONT font_h2() const { return font_h2_; }
+    HBRUSH brush_win() const { return brush_win_bg_; }
     HBRUSH brush_card() const { return brush_card_bg_; }
     HBRUSH brush_field() const { return brush_field_bg_; }
     HBRUSH brush_log() const { return brush_log_bg_; }
@@ -63,15 +64,21 @@ private:
     };
 
     HINSTANCE h_instance_ = nullptr;
-    HWND h_wnd_ = nullptr;                       // 菜单窗口
+    HWND h_wnd_ = nullptr;
 
     HWND btn_theme_ = nullptr;
     int hover_row_ = -1;
 
     HWND mod_wnd_[MOD_COUNT] = {};
     bool mod_open_[MOD_COUNT] = {};
-    RECT mod_rect_[MOD_COUNT] = {};
+    RECT mod_rect_[MOD_COUNT] = {};      // 主窗口客户区坐标
     std::vector<HWND> mod_ctl_[MOD_COUNT];
+
+    // 卡片拖动/缩放状态
+    int drag_mode_ = 0;                  // 0 无 / 1 移动 / 2 缩放
+    int drag_mod_ = -1;
+    POINT drag_pt_ = {};
+    RECT drag_rc0_ = {};
 
     // AI
     HWND edit_api_key_ = nullptr;
@@ -98,6 +105,7 @@ private:
     HWND btn_test_api_ = nullptr;
     HWND btn_advanced_ = nullptr;
     HWND btn_help_ = nullptr;
+    HWND btn_reset_layout_ = nullptr;
     // 日志
     HWND edit_log_ = nullptr;
     HWND btn_clear_log_ = nullptr;
@@ -113,7 +121,6 @@ private:
 
     std::set<int> hovered_;
 
-    // GDI
     HFONT font_brand_ = nullptr;
     HFONT font_h2_ = nullptr;
     HFONT font_body_ = nullptr;
@@ -128,17 +135,19 @@ private:
     void init_gdi_resources();
     void apply_theme(int index, bool persist);
 
-    void init_launcher(HWND hwnd);
-    void paint_launcher(HDC hdc, const RECT& rc);
-    int launcher_row_at(POINT pt) const;
-    void toggle_module(int kind);
+    void init_sidebar(HWND hwnd);
+    void paint_main(HDC hdc, const RECT& rc);
+    int sidebar_row_at(POINT pt) const;
 
     void create_module_windows();
     void create_module(int kind);
     void show_module(int kind, bool open);
+    void bring_to_front(int kind);
     void relayout_module(int kind);
-    void paint_module_window(int kind, HDC hdc, const RECT& rc);
+    void paint_module_card(int kind, HDC hdc, const RECT& rc);
     RECT default_module_rect(int kind) const;
+    void clamp_module(int kind);
+    void save_layout();
 
     void load_config_to_ui();
     void save_ui_to_config();
@@ -147,7 +156,7 @@ private:
 
     static const wchar_t* module_title(int kind);
 
-    static LRESULT CALLBACK launcher_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
+    static LRESULT CALLBACK main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK button_subclass_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                                                  UINT_PTR uIdSubclass, DWORD_PTR dwRefData);
