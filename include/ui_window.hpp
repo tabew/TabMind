@@ -13,17 +13,19 @@
 #define WM_USER_LOG (WM_USER + 101)
 
 // ---------------------------------------------------------------------------
-// TabMind UI v2
+// TabMind UI v3
 //
 // 单主窗口 + 左侧菜单 + 右侧自由摆放的嵌入式卡片。
 //
-// 相比 v1 的关键变更（针对"卡顿 / 抽动"）：
-//   1. 所有绘制走「内存 DC → 一次 BitBlt」的双缓冲，消除闪烁与撕裂；
-//   2. 画刷/画笔按主题缓存在 ui_gdi()，绘制路径不再 Create/Delete GDI 对象；
-//   3. 日志控件从 RichEdit 换成自绘 LISTBOX，只画可见行、不再整篇重排；
-//   4. 状态刷新走 400ms 定时器 + 脏标记，不再每条日志全窗口 Invalidate；
-//   5. 拖动卡片时先隐藏卡内控件，只移动 1 个窗口；松手用 DeferWindowPos 原子复位；
-//   6. 侧栏 hover 只重画受影响的两行；卡片 z 序只在真正变化时调整。
+// 性能要点（每一条都对应一个真实卡顿源）：
+//   A. 绘制用「内存 DC → BitBlt」双缓冲，且位图按无效区大小分配并跨帧复用，
+//      不做每帧 CreateCompatibleBitmap / DeleteObject；
+//   B. 画刷、画笔按主题缓存在 ui_gdi()，绘制路径里零 GDI 对象创建销毁；
+//   C. 日志是自绘 LISTBOX，只画可见行；追加是 O(1) 尾部插入；
+//   D. 状态刷新走 400ms 定时器 + 脏标记，不再每条日志全窗口 Invalidate；
+//   E. 拖动卡片时隐藏卡内控件，只搬 1 个窗口；松手用 DeferWindowPos 原子复位；
+//   F. 卡片 z 序惰性置顶，已置顶则完全不动作；
+//   G. 侧栏 hover 只重画受影响的两行。
 // ---------------------------------------------------------------------------
 class MainWindow {
 public:
@@ -77,12 +79,12 @@ private:
 
     HWND mod_wnd_[MOD_COUNT] = {};
     bool mod_open_[MOD_COUNT] = {};
-    RECT mod_rect_[MOD_COUNT] = {};                 // 主窗口客户区坐标
+    RECT mod_rect_[MOD_COUNT] = {};                  // 主窗口客户区坐标
     std::vector<HWND> mod_ctl_[MOD_COUNT];
-    int z_order_[MOD_COUNT] = { 0, 1, 2, 3, 4, 5 }; // 由下到上
+    int z_order_[MOD_COUNT] = { 0, 1, 2, 3, 4, 5 };  // 由下到上
 
     // 拖动/缩放状态
-    int drag_mode_ = 0;                 // 0 无 / 1 移动 / 2 缩放
+    int drag_mode_ = 0;                // 0 无 / 1 移动 / 2 缩放
     int drag_mod_ = -1;
     POINT drag_pt_ = {};
     RECT drag_rc0_ = {};
@@ -118,13 +120,13 @@ private:
     HWND list_log_ = nullptr;
     HWND btn_clear_log_ = nullptr;
     bool log_follow_ = true;
-    std::vector<wchar_t> log_buf_;
 
     AppConfig config_;
     std::unique_ptr<BotClient> bot_client_;
     bool is_bot_running_ = false;
     int total_msg_handled_ = 0;
     bool status_dirty_ = false;
+    bool destroying_ = false;   // WM_DESTROY 期间：不再对卡片窗口做重绘操作
     std::mutex log_mutex_;
     std::vector<std::string> pending_logs_;
 
@@ -152,7 +154,7 @@ private:
     void apply_z_order();
     void set_card_controls_visible(int kind, bool show);
     void relayout_module(int kind);
-    void paint_module_card(int kind, HDC hdc, const RECT& rc);
+    void paint_module_card(int kind, HDC hdc, const RECT& rc, const RECT& rcPaint);
     RECT default_module_rect(int kind) const;
     void clamp_module(int kind);
     void save_layout();
@@ -160,6 +162,7 @@ private:
     void load_config_to_ui();
     void save_ui_to_config();
     void update_status_ui();
+    void abort_drag();
     void log_scroll_bottom();
     void log_update_follow();
 

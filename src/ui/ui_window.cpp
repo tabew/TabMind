@@ -1,17 +1,19 @@
 // ===========================================================================
-// TabMind · UI v2（整体重写）
+// TabMind · UI v3（健壮性重写）
 //
-// 重写目标：彻底解决「卡顿 / 抽动」。v1 的六个性能病灶：
-//   1) 每次重绘都 CreateSolidBrush / CreatePen → 一帧几十次内核对象创建销毁
-//   2) 无双缓冲，直接在屏幕 DC 上又画底又画字 → 闪烁、半帧撕裂
-//   3) 日志用 RichEdit：每追加一行都要 EM_GETTEXTLENGTHEX 扫全文 +
-//      EM_SETCHARFORMAT + EM_SCROLLCARET + 整控件 Invalidate → 消息一多就卡死
-//   4) 每来一条日志就 update_status_ui() → 整个主窗口 InvalidateRect(NULL)
-//   5) 拖动卡片时卡内十几个子控件跟着一起被系统搬动、各自重绘 → 抽动
-//   6) 每次点击都 bring_to_front → 全部卡片重排重绘
-//
-// v2 的对应手段：缓存 GDI、全量双缓冲、自绘 LISTBOX 日志、
-//               状态刷新节流、拖动时只搬 1 个窗口、z 序惰性调整。
+// 相对 v2 修掉的问题：
+//   1) 每次重绘都 CreateCompatibleBitmap 分配全尺寸位图 —— 卡片 600x700 时
+//      一帧就是 1.7MB 的分配+清零，这是剩余卡顿的主因。改为跨帧复用的缓冲池。
+//   2) 拖动中一旦失去鼠标捕获（按 Alt / Esc / 切窗口），卡内控件会永久处于
+//      隐藏状态 → 卡片变成空白。已补 WM_CANCELMODE / WM_CAPTURECHANGED 兜底。
+//   3) 拖动时 WM_SETCURSOR 会把光标改回箭头 → 闪烁。拖动期间不再改光标。
+//   4) TrackMouseEvent 只在 hover 变化时布防一次，第二次移出可能不触发
+//      WM_MOUSELEAVE → 侧栏高亮卡死。改为每次离开都重新布防。
+//   5) 工作线程直接弹 MessageBoxW（跨线程 UI 调用，可能卡死）。
+//      改为 PostMessage 回 UI 线程处理。
+//   6) KillTimer 未调用、ModuleCtx 泄漏、log_buf_ 跨消息复用的成员缓冲区。
+//   7) 卡片阴影被裁在客户区外，根本看不见 —— 纯白耗，删掉。
+//   8) 尺寸/位置没变也重复 SetWindowPos 十几个控件。
 // ===========================================================================
 #include "ui_window.hpp"
 #include "ui_dialogs.hpp"
@@ -23,6 +25,7 @@
 #include <sstream>
 #include <iomanip>
 #include <thread>
+#include <chrono>
 #include <algorithm>
 
 #pragma comment(lib, "comctl32.lib")
@@ -60,60 +63,30 @@
 
 #define IDC_LIST_LOG             1301
 
-// ---------------------------------------------------------------------------
-// 布局常量
-// ---------------------------------------------------------------------------
+// 测试结果回传（工作线程 -> UI 线程）
+#define WM_APP_TEST_DONE         (WM_APP + 1)
+
 namespace Lay {
     const int SidebarW  = 218;
     const int TitleH    = 32;
     const int Grip      = 16;
     const int Pad       = 14;
-    const int Gap       = 10;
     const int RowH      = 30;
     const int GapY      = 16;
     const int DashLeft  = SidebarW + 12;
     const int MenuTop   = 100;
     const int MenuRowH  = 56;
+    const int MinCardW  = 240;
+    const int MinCardH  = 120;
 }
 
 namespace {
-    const int kLogRowH     = 19;    // 日志行高
-    const int kMaxLogLines = 1500;  // 日志上限，超出从头部裁掉
+    const int kLogRowH     = 19;
+    const int kMaxLogLines = 1500;
     const int kLogTrim     = 300;
     const int kStatusTimer = 1;
+    const int kPlgRowH     = 26;
 }
-
-// ---------------------------------------------------------------------------
-// 双缓冲：把无效区先画进内存 DC，最后一次 BitBlt 上屏
-// ---------------------------------------------------------------------------
-struct PaintBuf {
-    HDC mem = nullptr;
-    HBITMAP bm = nullptr;
-    HGDIOBJ old = nullptr;
-    RECT rc = {};
-
-    bool begin(HDC hdc, const RECT& r) {
-        int w = r.right - r.left, h = r.bottom - r.top;
-        if (w <= 0 || h <= 0) return false;
-        mem = CreateCompatibleDC(hdc);
-        if (!mem) return false;
-        bm = CreateCompatibleBitmap(hdc, w, h);
-        if (!bm) { DeleteDC(mem); mem = nullptr; return false; }
-        old = SelectObject(mem, bm);
-        SetWindowOrgEx(mem, r.left, r.top, NULL);
-        rc = r;
-        return true;
-    }
-    void end(HDC hdc) {
-        if (!mem) return;
-        BitBlt(hdc, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
-               mem, rc.left, rc.top, SRCCOPY);
-        SelectObject(mem, old);
-        DeleteObject(bm);
-        DeleteDC(mem);
-        mem = nullptr; bm = nullptr; old = nullptr;
-    }
-};
 
 // ---------------------------------------------------------------------------
 // 工具
@@ -147,7 +120,11 @@ static std::string get_window_text_u8(HWND hwnd) {
     return wstring_to_utf8(std::wstring(buf.data()));
 }
 
-// 自绘列表没有 RichEdit 的行高自适应，emoji 会撑坏行距，统一剥掉
+static bool is_hovered(const std::vector<int>& v, int id) {
+    return std::find(v.begin(), v.end(), id) != v.end();
+}
+
+// 自绘列表里 emoji 会撑坏行距，统一剥掉
 static void strip_emoji(std::wstring& s) {
     std::wstring out;
     out.reserve(s.size());
@@ -175,11 +152,19 @@ static void strip_emoji(std::wstring& s) {
 }
 
 // 日志级别：0 信息 / 1 AI / 2 成功 / 3 警告 / 4 错误
+// 注意这里读的是原始消息（尚未去除 emoji），所以 emoji 也能参与判定。
+// emoji 一律用 UTF-8 字节转义写，避免源码编码变化导致失效。
+namespace {
+const char kErrEmoji[]  = "\xE2\x9D\x8C";  // U+274C
+const char kWarnEmoji[] = "\xE2\x9A\xA0";  // U+26A0
+const char kOkEmoji[]   = "\xE2\x9C\x85";  // U+2705
+}
+
 static int log_level_of(const std::string& raw) {
     auto has = [&](const char* k) { return raw.find(k) != std::string::npos; };
-    if (has("❌") || has("失败") || has("错误") || has("异常") || has("FAIL")) return 4;
-    if (has("⚠") || has("未配置") || has("警告")) return 3;
-    if (has("✅") || has("√") || has("已上线") || has("已就绪") || has("通过")) return 2;
+    if (has(kErrEmoji) || has("失败") || has("错误") || has("异常") || has("FAIL")) return 4;
+    if (has(kWarnEmoji) || has("未配置") || has("警告")) return 3;
+    if (has(kOkEmoji) || has("已上线") || has("已就绪") || has("通过")) return 2;
     if (has("AI") || has("回复") || has("模型")) return 1;
     return 0;
 }
@@ -212,6 +197,73 @@ static void ensure_cursors() {
 }
 
 // ---------------------------------------------------------------------------
+// 双缓冲池
+// v2 每次重绘都 CreateCompatibleBitmap + DeleteObject，卡片大一点就是每帧
+// 几 MB 的分配/清零。这里按需扩容、跨帧复用，绘制路径零分配。
+// ---------------------------------------------------------------------------
+struct BufSlot {
+    HDC     hdc  = nullptr;
+    HBITMAP bmp  = nullptr;
+    int     w    = 0;
+    int     h    = 0;
+    bool    used = false;
+};
+
+static BufSlot g_bufs[4];
+
+struct PaintBuf {
+    BufSlot* slot = nullptr;
+    int l = 0, t = 0, r = 0, b = 0;
+
+    HDC mem_dc() const { return slot ? slot->hdc : nullptr; }
+
+    bool begin(HDC hdc, const RECT& rc) {
+        int w = rc.right - rc.left, h = rc.bottom - rc.top;
+        if (w <= 0 || h <= 0 || !hdc) return false;
+        slot = nullptr;
+        for (BufSlot& s : g_bufs) {
+            if (!s.used) { slot = &s; break; }
+        }
+        if (!slot) return false;
+
+        if (!slot->hdc) {
+            slot->hdc = CreateCompatibleDC(hdc);
+            if (!slot->hdc) { slot = nullptr; return false; }
+        }
+        if (!slot->bmp || slot->w < w || slot->h < h) {
+            HBITMAP nb = CreateCompatibleBitmap(hdc, w, h);
+            if (!nb) return false;
+            if (slot->bmp) DeleteObject(slot->bmp);
+            slot->bmp = nb;
+            slot->w = w;
+            slot->h = h;
+        }
+        SelectObject(slot->hdc, slot->bmp);
+        SetWindowOrgEx(slot->hdc, rc.left, rc.top, NULL);
+        slot->used = true;
+
+        l = rc.left; t = rc.top; r = rc.right; b = rc.bottom;
+        return true;
+    }
+
+    void end(HDC hdc) {
+        if (!slot || !hdc) return;
+        BitBlt(hdc, l, t, r - l, b - t, slot->hdc, l, t, SRCCOPY);
+        slot->used = false;
+        slot = nullptr;
+    }
+};
+
+// 释放全部缓冲池（退出时调用）
+static void free_buf_pool() {
+    for (BufSlot& s : g_bufs) {
+        if (s.bmp)  { DeleteObject(s.bmp);  s.bmp = nullptr; }
+        if (s.hdc)  { DeleteDC(s.hdc);      s.hdc = nullptr; }
+        s.w = 0; s.h = 0; s.used = false;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // 构造 / GDI
 // ---------------------------------------------------------------------------
 MainWindow::MainWindow() {}
@@ -219,6 +271,7 @@ MainWindow::MainWindow() {}
 MainWindow::~MainWindow() {
     HFONT fonts[] = { font_brand_, font_h2_, font_body_, font_body_bold_, font_small_, font_log_ };
     for (HFONT f : fonts) if (f) DeleteObject(f);
+    free_buf_pool();
 }
 
 MainWindow& MainWindow::get_instance() {
@@ -228,8 +281,8 @@ MainWindow& MainWindow::get_instance() {
 
 void MainWindow::init_gdi_resources() {
     ensure_cursors();
-    // 用 ANTIALIASED_QUALITY：在内存 DC 和屏幕 DC 上表现一致，
-    // 避免双缓冲后 ClearType 失效导致字体发虚。
+    // ANTIALIASED_QUALITY：内存 DC 与屏幕 DC 上表现一致，
+    // 不会像 ClearType 那样在双缓冲下发虚。
     auto mk = [](int h, int weight, const wchar_t* face) {
         return CreateFontW(-h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -245,7 +298,7 @@ void MainWindow::init_gdi_resources() {
 }
 
 const wchar_t* MainWindow::module_title(int kind) {
-    if (kind < 0 || kind >= 6) return L"";
+    if (kind < 0 || kind >= MOD_COUNT) return L"";
     return kMenu[kind];
 }
 
@@ -254,16 +307,21 @@ void MainWindow::apply_theme(int index, bool persist) {
     ui_gdi().build();
     const ThemePalette& t = theme();
 
+    if (h_wnd_ == nullptr) {
+        if (persist) { config_.ui.theme = theme_index(); config_.save_to_file("config.json"); }
+        return;
+    }
+
     if (btn_theme_) SetWindowTextW(btn_theme_, (std::wstring(L"主题 · ") + t.name).c_str());
 
     const wchar_t* wt = t.dark ? L"DarkMode_Explorer" : L"Explorer";
     for (int k = 0; k < MOD_COUNT; ++k) {
         for (HWND h : mod_ctl_[k]) {
-            if (h) { SetWindowTheme(h, wt, NULL); InvalidateRect(h, NULL, TRUE); }
+            if (h) { SetWindowTheme(h, wt, NULL); InvalidateRect(h, NULL, FALSE); }
         }
         if (mod_wnd_[k]) InvalidateRect(mod_wnd_[k], NULL, FALSE);
     }
-    InvalidateRect(h_wnd_, NULL, FALSE);
+    RedrawWindow(h_wnd_, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
 
     if (persist) {
         config_.ui.theme = theme_index();
@@ -274,33 +332,28 @@ void MainWindow::apply_theme(int index, bool persist) {
 LRESULT CALLBACK MainWindow::button_subclass_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam,
                                                  UINT_PTR uIdSubclass, DWORD_PTR dwRefData) {
     MainWindow* self = (MainWindow*)dwRefData;
+    if (!self) return DefSubclassProc(hwnd, uMsg, wParam, lParam);
     switch (uMsg) {
     case WM_ERASEBKGND:
-        return 1;   // 不擦背景，WM_PAINT 里一次性画完
-    case WM_MOUSEMOVE:
-        if (self) {
-            int id = (int)uIdSubclass;
-            if (std::find(self->hovered_.begin(), self->hovered_.end(), id) == self->hovered_.end()) {
-                self->hovered_.push_back(id);
-                TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
-                TrackMouseEvent(&tme);
-                InvalidateRect(hwnd, NULL, FALSE);
-            }
-        }
-        break;
-    case WM_MOUSELEAVE:
-        if (self) {
-            auto& v = self->hovered_;
-            v.erase(std::remove(v.begin(), v.end(), (int)uIdSubclass), v.end());
+        return 1;                     // 全部在 WM_PAINT 里画，避免先擦后画的闪烁
+    case WM_MOUSEMOVE: {
+        int id = (int)uIdSubclass;
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
+        if (!is_hovered(self->hovered_, id)) {
+            self->hovered_.push_back(id);
             InvalidateRect(hwnd, NULL, FALSE);
         }
         break;
     }
+    case WM_MOUSELEAVE: {
+        auto& v = self->hovered_;
+        v.erase(std::remove(v.begin(), v.end(), (int)uIdSubclass), v.end());
+        InvalidateRect(hwnd, NULL, FALSE);
+        break;
+    }
+    }
     return DefSubclassProc(hwnd, uMsg, wParam, lParam);
-}
-
-static bool is_hovered(const std::vector<int>& v, int id) {
-    return std::find(v.begin(), v.end(), id) != v.end();
 }
 
 // ---------------------------------------------------------------------------
@@ -325,7 +378,7 @@ bool MainWindow::create_and_show(HINSTANCE hInstance, int nCmdShow) {
     wc.lpszClassName = L"TabMind_Main";
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = ui_gdi().br_win;
-    RegisterClassW(&wc);
+    if (!RegisterClassW(&wc)) return false;
 
     WNDCLASSW wm = {};
     wm.lpfnWndProc = MainWindow::module_proc;
@@ -333,17 +386,17 @@ bool MainWindow::create_and_show(HINSTANCE hInstance, int nCmdShow) {
     wm.lpszClassName = L"TabMind_Card";
     wm.hCursor = LoadCursor(NULL, IDC_ARROW);
     wm.hbrBackground = ui_gdi().br_win;
-    RegisterClassW(&wm);
+    if (!RegisterClassW(&wm)) return false;
 
     RECT wa = { 0, 0, GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN) };
     SystemParametersInfoW(SPI_GETWORKAREA, 0, &wa, 0);
     int win_w = 1200, win_h = 780;
     int max_w = (wa.right - wa.left) - 24;
     int max_h = (wa.bottom - wa.top) - 24;
+    if (max_w < 900) max_w = 900;
+    if (max_h < 620) max_h = 620;
     if (win_w > max_w) win_w = max_w;
     if (win_h > max_h) win_h = max_h;
-    if (win_w < 900) win_w = 900;
-    if (win_h < 620) win_h = 620;
     int pos_x = wa.left + ((wa.right - wa.left) - win_w) / 2;
     int pos_y = wa.top + ((wa.bottom - wa.top) - win_h) / 2;
 
@@ -379,15 +432,22 @@ bool MainWindow::create_and_show(HINSTANCE hInstance, int nCmdShow) {
 }
 
 void MainWindow::init_sidebar(HWND hwnd) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int y = rc.bottom - 44;
+    if (y < 120) y = 120;
     btn_theme_ = CreateWindowW(L"BUTTON", (std::wstring(L"主题 · ") + theme().name).c_str(),
-                               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                               14, 0, Lay::SidebarW - 28, 34, hwnd,
+                               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
+                               14, y, (Lay::SidebarW - 28), 34, hwnd,
                                (HMENU)(INT_PTR)IDC_BTN_THEME, h_instance_, NULL);
-    SetWindowSubclass(btn_theme_, MainWindow::button_subclass_proc, IDC_BTN_THEME, (DWORD_PTR)this);
+    if (btn_theme_) {
+        SetWindowSubclass(btn_theme_, MainWindow::button_subclass_proc, IDC_BTN_THEME,
+                          (DWORD_PTR)this);
+    }
 }
 
 // ---------------------------------------------------------------------------
-// 主窗口绘制（左侧菜单 + 工作区底色）
+// 主窗口绘制
 // ---------------------------------------------------------------------------
 void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
     const ThemePalette& t = theme();
@@ -397,7 +457,7 @@ void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
 
     RECT side = { 0, 0, Lay::SidebarW, rc.bottom };
     RECT inter = {};
-    if (!IntersectRect(&inter, &side, &rcPaint)) return;
+    if (!IntersectRect(&inter, &side, &rcPaint)) return;   // 侧栏无需重绘
 
     FillRect(hdc, &side, g.br_card);
     {
@@ -415,16 +475,16 @@ void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, RGB(255, 255, 255));
         RECT tr = rcLogo;
-        DrawTextW(hdc, L"T", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(hdc, L"T", -1, &tr, DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
 
         SetTextColor(hdc, t.text_main);
         RECT tr1 = { 54, 13, Lay::SidebarW - 10, 38 };
-        DrawTextW(hdc, L"TabMind", -1, &tr1, DT_LEFT | DT_TOP | DT_SINGLELINE);
+        DrawTextW(hdc, L"TabMind", -1, &tr1, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
 
         SelectObject(hdc, font_small_);
         SetTextColor(hdc, t.text_sub);
         RECT tr2 = { 56, 36, Lay::SidebarW - 8, 54 };
-        DrawTextW(hdc, L"AI Agent Console", -1, &tr2, DT_LEFT | DT_TOP | DT_SINGLELINE);
+        DrawTextW(hdc, L"AI Agent Console", -1, &tr2, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(hdc, old);
     }
 
@@ -451,7 +511,7 @@ void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
     }
 
     // 菜单行
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < MOD_COUNT; ++i) {
         RECT row = sidebar_row_rect(i);
         bool open = mod_open_[i];
         bool hover = (hover_row_ == i);
@@ -468,11 +528,12 @@ void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, open ? t.primary : t.text_main);
         RECT tr = { row.left + 14, row.top, row.right - 26, row.bottom };
-        DrawTextW(hdc, kMenu[i], -1, &tr, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        DrawTextW(hdc, kMenu[i], -1, &tr,
+                  DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         if (open) {
             SetTextColor(hdc, t.primary);
             RECT tr2 = { row.right - 26, row.top, row.right - 8, row.bottom };
-            DrawTextW(hdc, L"●", -1, &tr2, DT_RIGHT | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, L"●", -1, &tr2, DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         }
         SelectObject(hdc, old);
     }
@@ -484,7 +545,7 @@ void MainWindow::paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint) {
         SetTextColor(hdc, t.text_faint);
         RECT tr = { 14, rc.bottom - 92, Lay::SidebarW - 14, rc.bottom - 76 };
         DrawTextW(hdc, L"拖标题移动 · 右下角缩放", -1, &tr,
-                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+                  DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         SelectObject(hdc, old);
     }
 }
@@ -496,7 +557,7 @@ RECT MainWindow::sidebar_row_rect(int row) const {
 
 int MainWindow::sidebar_row_at(POINT pt) const {
     if (pt.x < 12 || pt.x >= Lay::SidebarW - 12) return -1;
-    for (int i = 0; i < 6; ++i) {
+    for (int i = 0; i < MOD_COUNT; ++i) {
         RECT r = sidebar_row_rect(i);
         if (pt.y >= r.top && pt.y < r.bottom) return i;
     }
@@ -512,7 +573,9 @@ RECT MainWindow::default_module_rect(int kind) const {
     int x0 = Lay::DashLeft, y0 = 12;
     int avail_w = cr.right - x0 - 12;
     int avail_h = cr.bottom - 24;
-    int col = avail_w / 3 - Lay::Gap;
+    if (avail_w < 300) avail_w = 300;
+    if (avail_h < 200) avail_h = 200;
+    int col = avail_w / 3 - 10;
     if (col < 260) col = 260;
 
     auto mk = [&](int x, int y, int w, int h) { return RECT{ x, y, x + w, y + h }; };
@@ -520,10 +583,10 @@ RECT MainWindow::default_module_rect(int kind) const {
     switch (kind) {
     case MOD_STATUS: return mk(x0, y0, col, 122);
     case MOD_AI:     return mk(x0, y0 + 132, col, avail_h - 132);
-    case MOD_PLUGIN: return mk(x0 + col + Lay::Gap, y0, col, 250);
-    case MOD_QQ:     return mk(x0 + col + Lay::Gap, y0 + 260, col, avail_h - 260);
-    case MOD_ACTION: return mk(x0 + (col + Lay::Gap) * 2, y0, col, 250);
-    case MOD_LOG:    return mk(x0 + (col + Lay::Gap) * 2, y0 + 260, col, avail_h - 260);
+    case MOD_PLUGIN: return mk(x0 + col + 10, y0, col, 250);
+    case MOD_QQ:     return mk(x0 + col + 10, y0 + 260, col, avail_h - 260);
+    case MOD_ACTION: return mk(x0 + (col + 10) * 2, y0, col, 250);
+    case MOD_LOG:    return mk(x0 + (col + 10) * 2, y0 + 260, col, avail_h - 260);
     default:         return mk(x0, y0, 300, 200);
     }
 }
@@ -533,7 +596,7 @@ void MainWindow::create_module_windows() {
 }
 
 void MainWindow::create_module(int kind) {
-    if (mod_wnd_[kind]) return;
+    if (kind < 0 || kind >= MOD_COUNT || mod_wnd_[kind]) return;
 
     bool has_cfg = (config_.ui.modules.size() == (size_t)MOD_COUNT);
     RECT rc = default_module_rect(kind);
@@ -545,32 +608,40 @@ void MainWindow::create_module(int kind) {
         mod_open_[kind] = true;
     }
     mod_rect_[kind] = rc;
+    clamp_module(kind);
 
-    ModuleCtx* ctx = new ModuleCtx{ this, kind };
+    ModuleCtx* ctx = new (std::nothrow) ModuleCtx{ this, kind };
+    if (!ctx) return;
+
     mod_wnd_[kind] = CreateWindowExW(0, L"TabMind_Card", module_title(kind),
                                      WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                                     rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                                     mod_rect_[kind].left, mod_rect_[kind].top,
+                                     mod_rect_[kind].right - mod_rect_[kind].left,
+                                     mod_rect_[kind].bottom - mod_rect_[kind].top,
                                      h_wnd_, NULL, h_instance_, ctx);
     if (!mod_wnd_[kind]) { delete ctx; return; }
 
     HWND p = mod_wnd_[kind];
     auto mk_label = [&](const wchar_t* text, HFONT font) {
-        HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT,
+        HWND h = CreateWindowW(L"STATIC", text, WS_CHILD | WS_VISIBLE | SS_LEFT | SS_NOTIFY,
                                -3000, -3000, 10, 10, p, NULL, h_instance_, NULL);
-        SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
+        if (h) SendMessageW(h, WM_SETFONT, (WPARAM)font, TRUE);
         return h;
     };
     auto mk_edit = [&](int id, DWORD style) {
         HWND e = CreateWindowExW(0, L"EDIT", L"", WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL | style,
                                  -3000, -3000, 10, 10, p, (HMENU)(INT_PTR)id, h_instance_, NULL);
-        SendMessageW(e, WM_SETFONT, (WPARAM)font_body_, TRUE);
-        SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+        if (e) {
+            SendMessageW(e, WM_SETFONT, (WPARAM)font_body_, TRUE);
+            SendMessageW(e, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+        }
         return e;
     };
     auto mk_button = [&](int id, const wchar_t* text) {
-        HWND b = CreateWindowW(L"BUTTON", text, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+        HWND b = CreateWindowW(L"BUTTON", text,
+                               WS_CHILD | WS_VISIBLE | BS_OWNERDRAW | WS_TABSTOP,
                                -3000, -3000, 10, 10, p, (HMENU)(INT_PTR)id, h_instance_, NULL);
-        SetWindowSubclass(b, MainWindow::button_subclass_proc, id, (DWORD_PTR)this);
+        if (b) SetWindowSubclass(b, MainWindow::button_subclass_proc, id, (DWORD_PTR)this);
         return b;
     };
 
@@ -589,8 +660,8 @@ void MainWindow::create_module(int kind) {
                                      WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                                      -3000, -3000, 10, 200, p,
                                      (HMENU)(INT_PTR)IDC_COMBO_MODEL, h_instance_, NULL);
-        SendMessageW(combo_model_, WM_SETFONT, (WPARAM)font_body_, TRUE);
-        {
+        if (combo_model_) {
+            SendMessageW(combo_model_, WM_SETFONT, (WPARAM)font_body_, TRUE);
             const wchar_t* models[] = { L"deepseek-chat", L"deepseek-reasoner", L"deepseek-v4-flash",
                                         L"gpt-4o-mini", L"gpt-4o" };
             for (const wchar_t* m : models) SendMessageW(combo_model_, CB_ADDSTRING, 0, (LPARAM)m);
@@ -605,15 +676,18 @@ void MainWindow::create_module(int kind) {
         edit_system_prompt_ = CreateWindowExW(0, L"EDIT", L"",
             WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_VSCROLL,
             -3000, -3000, 10, 10, p, (HMENU)(INT_PTR)IDC_EDIT_SYSTEM_PROMPT, h_instance_, NULL);
-        SendMessageW(edit_system_prompt_, WM_SETFONT, (WPARAM)font_body_, TRUE);
-        SendMessageW(edit_system_prompt_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN, MAKELPARAM(8, 8));
+        if (edit_system_prompt_) {
+            SendMessageW(edit_system_prompt_, WM_SETFONT, (WPARAM)font_body_, TRUE);
+            SendMessageW(edit_system_prompt_, EM_SETMARGINS, EC_LEFTMARGIN | EC_RIGHTMARGIN,
+                                         MAKELPARAM(8, 8));
+        }
         mod_ctl_[kind].push_back(edit_system_prompt_);
     } else if (kind == MOD_QQ) {
         mod_ctl_[kind].push_back(mk_label(L"OneBot WebSocket 地址", font_small_));
         edit_ws_url_ = mk_edit(IDC_EDIT_WS_URL, 0);
         mod_ctl_[kind].push_back(edit_ws_url_);
         mod_ctl_[kind].push_back(mk_label(L"机器人 QQ 号", font_small_));
-        mod_ctl_[kind].push_back(mk_label(L"Access Token（无则留空）", font_small_));
+        mod_ctl_[kind].push_back(mk_label(L"Access Token", font_small_));
         edit_bot_qq_ = mk_edit(IDC_EDIT_BOT_QQ, ES_NUMBER);
         mod_ctl_[kind].push_back(edit_bot_qq_);
         edit_access_token_ = mk_edit(IDC_EDIT_ACCESS_TOKEN, 0);
@@ -623,9 +697,11 @@ void MainWindow::create_module(int kind) {
         mod_ctl_[kind].push_back(edit_prefixes_);
 
         chk_group_require_at_ = CreateWindowW(L"BUTTON", L"群聊必须 @机器人 或命中前缀",
-            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX, -3000, -3000, 10, 10, p,
+            WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX | WS_TABSTOP, -3000, -3000, 10, 10, p,
             (HMENU)(INT_PTR)IDC_CHK_REQUIRE_AT, h_instance_, NULL);
-        SendMessageW(chk_group_require_at_, WM_SETFONT, (WPARAM)font_body_, TRUE);
+        if (chk_group_require_at_) {
+            SendMessageW(chk_group_require_at_, WM_SETFONT, (WPARAM)font_body_, TRUE);
+        }
         mod_ctl_[kind].push_back(chk_group_require_at_);
 
         mod_ctl_[kind].push_back(mk_label(L"免 @ 插件（逗号分隔）", font_small_));
@@ -660,12 +736,14 @@ void MainWindow::create_module(int kind) {
         // 自绘 LISTBOX 取代 RichEdit：只画可见行，追加是 O(1) 的尾部插入
         list_log_ = CreateWindowExW(0, L"LISTBOX", L"",
             WS_CHILD | WS_VISIBLE | WS_VSCROLL | WS_BORDER |
-            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | LBS_DISABLENOSCROLL,
+            LBS_OWNERDRAWFIXED | LBS_HASSTRINGS | LBS_NOINTEGRALHEIGHT | LBS_NOTIFY,
             -3000, -3000, 10, 10, p, (HMENU)(INT_PTR)IDC_LIST_LOG, h_instance_, NULL);
-        SendMessageW(list_log_, WM_SETFONT, (WPARAM)font_log_, TRUE);
-        SendMessageW(list_log_, LB_SETITEMHEIGHT, 0, MAKELPARAM(kLogRowH, 0));
-        SendMessageW(list_log_, LB_INITSTORAGE, (WPARAM)kMaxLogLines,
-                     (LPARAM)(kMaxLogLines * 96));   // 预分配，避免追加时反复扩容
+        if (list_log_) {
+            SendMessageW(list_log_, WM_SETFONT, (WPARAM)font_log_, TRUE);
+            SendMessageW(list_log_, LB_SETITEMHEIGHT, 0, MAKELPARAM(kLogRowH, 0));
+            SendMessageW(list_log_, LB_INITSTORAGE, (WPARAM)kMaxLogLines,
+                         (LPARAM)(kMaxLogLines * 96));
+        }
         mod_ctl_[kind].push_back(list_log_);
     }
 
@@ -678,8 +756,8 @@ void MainWindow::show_module(int kind, bool open) {
     mod_open_[kind] = open;
     ShowWindow(mod_wnd_[kind], open ? SW_SHOW : SW_HIDE);
     if (open) bring_to_front(kind);
+    if (h_wnd_) InvalidateRect(h_wnd_, NULL, FALSE);
     save_layout();
-    InvalidateRect(h_wnd_, NULL, FALSE);
 }
 
 void MainWindow::apply_z_order() {
@@ -691,10 +769,11 @@ void MainWindow::apply_z_order() {
                                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_NOREDRAW);
     }
     EndDeferWindowPos(hdwp);
+    // 换序后原本被盖住的区域要重画
+    if (h_wnd_) InvalidateRect(h_wnd_, NULL, FALSE);
 }
 
-// 惰性置顶：已经在最上层就什么都不做。v1 每次点击都重排全部卡片，
-// 造成"点一下输入框整屏卡片闪一遍"。
+// 惰性置顶：已经在最上层就什么都不做，避免每次点击都全卡片重排
 void MainWindow::bring_to_front(int kind) {
     if (kind < 0 || kind >= MOD_COUNT || !mod_wnd_[kind]) return;
     if (z_order_[MOD_COUNT - 1] == kind) return;
@@ -706,7 +785,7 @@ void MainWindow::bring_to_front(int kind) {
     apply_z_order();
 }
 
-// 批量显示/隐藏卡内控件：一次 DeferWindowPos 完成，避免逐个 ShowWindow 触发多次重绘
+// 批量显示/隐藏卡内控件：一次 DeferWindowPos 完成
 void MainWindow::set_card_controls_visible(int kind, bool show) {
     auto& v = mod_ctl_[kind];
     if (v.empty()) return;
@@ -722,12 +801,13 @@ void MainWindow::set_card_controls_visible(int kind, bool show) {
 }
 
 void MainWindow::clamp_module(int kind) {
+    if (kind < 0 || kind >= MOD_COUNT) return;
     RECT cr = { 0, 0, 900, 620 };
     if (h_wnd_) GetClientRect(h_wnd_, &cr);
     RECT& r = mod_rect_[kind];
     int w = r.right - r.left, h = r.bottom - r.top;
-    if (w < 240) w = 240;
-    if (h < 120) h = 120;
+    if (w < Lay::MinCardW) w = Lay::MinCardW;
+    if (h < Lay::MinCardH) h = Lay::MinCardH;
     int min_x = Lay::DashLeft, min_y = 8;
     int max_x = cr.right - 8 - w;
     int max_y = cr.bottom - 8 - h;
@@ -741,7 +821,7 @@ void MainWindow::clamp_module(int kind) {
     r.bottom = r.top + h;
     if (mod_wnd_[kind]) {
         SetWindowPos(mod_wnd_[kind], NULL, r.left, r.top, w, h,
-                     SWP_NOZORDER | SWP_NOACTIVATE);
+                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
     }
 }
 
@@ -767,18 +847,33 @@ void MainWindow::relayout_module(int kind) {
     RECT cr;
     GetClientRect(p, &cr);
     int W = cr.right, H = cr.bottom;
+    // 卡片太小就不摆控件，避免算出负坐标把控件挪到屏幕外
+    if (W < 96 || H < 60) return;
+
     const int P = Lay::Pad;
     const int top = Lay::TitleH + 8;
     const int rowH = Lay::RowH;
     const int gapY = Lay::GapY;
 
-    auto place = [](HWND h, int x, int y, int w, int hh) {
-        if (h) SetWindowPos(h, NULL, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
+    // 参数没变就不调 SetWindowPos —— 否则每次主窗口 WM_SIZE 都会把
+    // 几十个控件逐个重摆一遍，各触发一次重绘
+    auto place = [p](HWND h, int x, int y, int w, int hh) {
+        if (!h) return;
+        RECT cur;
+        if (GetWindowRect(h, &cur)) {
+            POINT tl = { cur.left, cur.top };
+            POINT br = { cur.right, cur.bottom };
+            MapWindowPoints(HWND_DESKTOP, p, &tl, 1);
+            MapWindowPoints(HWND_DESKTOP, p, &br, 1);
+            if (tl.x == x && tl.y == y && (br.x - tl.x) == w && (br.y - tl.y) == hh) return;
+        }
+        SetWindowPos(h, NULL, x, y, w, hh, SWP_NOZORDER | SWP_NOACTIVATE);
     };
 
     if (kind == MOD_AI) {
         auto& c = mod_ctl_[kind];
         int L = P, CW = W - P * 2;
+        if (CW < 40) CW = 40;
         int y = top;
         place(c[0], L, y, CW, 16);
         place(edit_base_url_, L, y + 17, CW, rowH);
@@ -792,7 +887,7 @@ void MainWindow::relayout_module(int kind) {
         int cRound = CW - cModel - cTok - 16;
         if (cRound < 46) cRound = 46;
         place(c[4], L, y, cModel, 16);
-        place(combo_model_, L, y + 17, cModel, 220);
+        place(combo_model_, L, y + 17, cModel, 200);
         place(c[5], L + cModel + 8, y, cTok, 16);
         place(edit_max_tokens_, L + cModel + 8, y + 17, cTok, rowH);
         place(c[6], L + cModel + cTok + 16, y, cRound, 16);
@@ -806,6 +901,7 @@ void MainWindow::relayout_module(int kind) {
     } else if (kind == MOD_QQ) {
         auto& c = mod_ctl_[kind];
         int L = P, CW = W - P * 2;
+        if (CW < 40) CW = 40;
         int y = top;
         place(c[0], L, y, CW, 16);
         place(edit_ws_url_, L, y + 17, CW, rowH);
@@ -829,6 +925,7 @@ void MainWindow::relayout_module(int kind) {
     } else if (kind == MOD_PLUGIN) {
         auto& c = mod_ctl_[kind];
         int L = P, CW = W - P * 2;
+        if (CW < 40) CW = 40;
         place(c[0], L, top, CW, 30);
         int y = top + 36;
         int bw = (CW - 16) / 3;
@@ -838,6 +935,7 @@ void MainWindow::relayout_module(int kind) {
         place(btn_plugin_mgr_, L + (bw + 8) * 2, y, bw, 30);
     } else if (kind == MOD_ACTION) {
         int L = P, CW = W - P * 2;
+        if (CW < 40) CW = 40;
         int y = top;
         place(btn_toggle_bot_, L, y, CW, 42);
         y += 52;
@@ -858,14 +956,12 @@ void MainWindow::relayout_module(int kind) {
     }
 }
 
-void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
+void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc, const RECT& rcPaint) {
     const ThemePalette& t = theme();
     UiGdiCache& g = ui_gdi();
+    (void)rcPaint;                     // 缓冲已按无效区裁剪，这里按全客户区画
 
     FillRect(hdc, &rc, g.br_win);
-
-    RECT sh = { rc.left - 1, rc.top + 2, rc.right + 1, rc.bottom + 2 };
-    ui_round(hdc, sh, 12, 12, g.br_shadow, g.pen_null);
     ui_round(hdc, rc, 12, 12, g.br_card, g.pen_border);
 
     // 标题
@@ -874,9 +970,9 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
     SetTextColor(hdc, t.text_main);
     RECT rcTitle = { Lay::Pad, 6, rc.right - 40, Lay::TitleH };
     DrawTextW(hdc, module_title(kind), -1, &rcTitle,
-              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+              DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
-    // 关闭按钮 ×
+    // 关闭按钮
     RECT rcClose = { rc.right - 30, 7, rc.right - 10, 27 };
     ui_round(hdc, rcClose, 10, 10, g.br_field, g.pen_null);
     {
@@ -885,6 +981,19 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
         LineTo(hdc, rcClose.right - 6, rcClose.bottom - 6);
         MoveToEx(hdc, rcClose.right - 6, rcClose.top + 6, NULL);
         LineTo(hdc, rcClose.left + 6, rcClose.bottom - 6);
+        SelectObject(hdc, op);
+    }
+
+    // 缩放手柄
+    if (rc.bottom - rc.top > Lay::TitleH + 30) {
+        int gl = rc.right - Lay::Grip, gt = rc.bottom - Lay::Grip;
+        HGDIOBJ op = SelectObject(hdc, g.pen_text_sub);
+        for (int i = 1; i <= 3; ++i) {
+            int x0 = gl + i * 4;
+            int y0 = gt + i * 4;
+            MoveToEx(hdc, x0, rc.bottom - 2, NULL);
+            LineTo(hdc, rc.right - 2, y0);
+        }
         SelectObject(hdc, op);
     }
 
@@ -907,8 +1016,9 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
     } else if (kind == MOD_PLUGIN) {
         int L = Lay::Pad, W = rc.right - Lay::Pad * 2;
         int list_top = Lay::TitleH + 78;
-        int row_h = 26;
-        int max_rows = (rc.bottom - Lay::Pad - 16 - list_top) / row_h;
+        int avail = rc.bottom - Lay::Pad - 16 - list_top;
+        if (avail < kPlgRowH) return;
+        int max_rows = avail / kPlgRowH;
         if (max_rows < 1) max_rows = 1;
 
         HGDIOBJ old2 = SelectObject(hdc, font_small_);
@@ -917,13 +1027,13 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
             SetTextColor(hdc, t.text_faint);
             RECT rcE = { L, list_top, L + W, list_top + 20 };
             DrawTextW(hdc, L"暂无插件 · 把 DLL 放进 plugins 目录", -1, &rcE,
-                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS);
+                      DT_LEFT | DT_TOP | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
         } else {
             int shown = 0;
             for (const auto& pl : plugin_cache_) {
                 if (shown >= max_rows) break;
-                int y = list_top + shown * row_h;
-                RECT rcRow = { L, y, L + W, y + row_h - 4 };
+                int y = list_top + shown * kPlgRowH;
+                RECT rcRow = { L, y, L + W, y + kPlgRowH - 4 };
                 ui_round(hdc, rcRow, 7, 7, g.br_field, g.pen_null);
                 {
                     HGDIOBJ ob = SelectObject(hdc, pl.enabled ? g.br_success : g.br_text_faint);
@@ -934,22 +1044,23 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
                 }
                 SelectObject(hdc, font_body_);
                 SetTextColor(hdc, pl.enabled ? t.text_main : t.text_sub);
-                RECT rcName = { L + 20, y + 1, L + W - 56, y + row_h - 4 };
+                RECT rcName = { L + 20, y + 1, L + W - 56, y + kPlgRowH - 4 };
                 DrawTextW(hdc, utf8_to_wstring(pl.name).c_str(), -1, &rcName,
-                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                          DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
 
                 SelectObject(hdc, font_small_);
                 SetTextColor(hdc, t.text_faint);
-                RECT rcVer = { L + W - 54, y + 1, L + W - 6, y + row_h - 4 };
+                RECT rcVer = { L + W - 54, y + 1, L + W - 6, y + kPlgRowH - 4 };
                 DrawTextW(hdc, utf8_to_wstring("v" + pl.version).c_str(), -1, &rcVer,
-                          DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+                          DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
                 ++shown;
             }
             if ((int)plugin_cache_.size() > shown) {
-                RECT rcMore = { L, list_top + shown * row_h, L + W, list_top + shown * row_h + 16 };
+                RECT rcMore = { L, list_top + shown * kPlgRowH, L + W,
+                                list_top + shown * kPlgRowH + 16 };
                 SetTextColor(hdc, t.text_faint);
                 std::wstring more = L"还有 " + std::to_wstring(plugin_cache_.size() - shown) + L" 个";
-                DrawTextW(hdc, more.c_str(), -1, &rcMore, DT_LEFT | DT_TOP | DT_SINGLELINE);
+                DrawTextW(hdc, more.c_str(), -1, &rcMore, DT_LEFT | DT_TOP | DT_SINGLELINE | DT_NOPREFIX);
             }
         }
         SelectObject(hdc, old2);
@@ -958,24 +1069,24 @@ void MainWindow::paint_module_card(int kind, HDC hdc, const RECT& rc) {
 }
 
 // ---------------------------------------------------------------------------
-// 配置
+// 配置读写
 // ---------------------------------------------------------------------------
 void MainWindow::load_config_to_ui() {
     set_window_text_u8(edit_api_key_, config_.ai.api_key);
     set_window_text_u8(edit_base_url_, config_.ai.base_url);
     if (combo_model_) {
         std::wstring want = utf8_to_wstring(config_.ai.model);
-        int idx = (int)SendMessageW(combo_model_, CB_FINDSTRINGEXACT, (WPARAM)-1, (LPARAM)want.c_str());
+        int idx = (int)SendMessageW(combo_model_, CB_FINDSTRINGEXACT, (WPARAM)-1,
+                                    (LPARAM)want.c_str());
         if (idx == CB_ERR && !want.empty()) {
             SendMessageW(combo_model_, CB_ADDSTRING, 0, (LPARAM)want.c_str());
             idx = (int)SendMessageW(combo_model_, CB_GETCOUNT, 0, 0) - 1;
         }
-        if (idx != CB_ERR) SendMessageW(combo_model_, CB_SETCURSEL, idx, 0);
+        if (idx != CB_ERR && idx >= 0) SendMessageW(combo_model_, CB_SETCURSEL, idx, 0);
     }
     set_window_text_u8(edit_system_prompt_, config_.ai.system_prompt);
     set_window_text_u8(edit_max_tokens_, std::to_string(config_.ai.max_tokens));
     set_window_text_u8(edit_history_rounds_, std::to_string(config_.ai.max_history_rounds));
-
     set_window_text_u8(edit_ws_url_, config_.onebot.ws_url);
     set_window_text_u8(edit_bot_qq_, std::to_string(config_.onebot.bot_qq));
     set_window_text_u8(edit_access_token_, config_.onebot.access_token);
@@ -1035,12 +1146,13 @@ void MainWindow::save_ui_to_config() {
 
 // 只重画真正会变的两小块：侧栏状态条 + 运行状态卡片
 void MainWindow::update_status_ui() {
+    if (h_wnd_ == nullptr) { status_dirty_ = false; return; }
     if (btn_toggle_bot_) {
         SetWindowTextW(btn_toggle_bot_, is_bot_running_ ? L"停止机器人" : L"启动机器人");
         InvalidateRect(btn_toggle_bot_, NULL, FALSE);
     }
     if (mod_wnd_[MOD_STATUS]) InvalidateRect(mod_wnd_[MOD_STATUS], NULL, FALSE);
-    if (h_wnd_) {
+    {
         RECT pill = { 0, 54, Lay::SidebarW, 90 };
         InvalidateRect(h_wnd_, &pill, FALSE);
     }
@@ -1070,8 +1182,11 @@ void MainWindow::action_toggle_bot() {
         save_ui_to_config();
         if (config_.ai.api_key.empty()) {
             show_module(MOD_AI, true);
-            SetFocus(edit_api_key_);
-            MessageBoxW(h_wnd_, L"请先在「AI 接口配置」卡片填写 API Key。", L"缺少配置", MB_OK | MB_ICONWARNING);
+            if (edit_api_key_) SetFocus(edit_api_key_);
+            if (h_wnd_) {
+                MessageBoxW(h_wnd_, L"请先在「AI 接口配置」卡片填写 API Key。",
+                            L"缺少配置", MB_OK | MB_ICONWARNING);
+            }
             return;
         }
         log("正在连接 OneBot: " + config_.onebot.ws_url + " ...");
@@ -1086,25 +1201,39 @@ void MainWindow::action_toggle_bot() {
 void MainWindow::action_save_config() {
     save_ui_to_config();
     log("配置已保存到 config.json");
-    MessageBoxW(h_wnd_, L"配置已保存。", L"保存成功", MB_OK | MB_ICONINFORMATION);
+    if (h_wnd_) MessageBoxW(h_wnd_, L"配置已保存。", L"保存成功", MB_OK | MB_ICONINFORMATION);
 }
+
+// 测试结果：从工作线程回传，保证弹窗只发生在 UI 线程
+struct TestResultPayload {
+    bool ok;
+    std::string detail;
+};
 
 void MainWindow::action_test_api() {
     save_ui_to_config();
     log("正在测试 AI 接口: " + config_.ai.base_url + " ...");
 
-    std::thread([this]() {
-        AIClient client(config_.ai);
-        std::string reply = client.chat("test_ping", "请回复两个字：收到");
-        if (reply.find("【AI") != std::string::npos) {
-            log("接口测试失败: " + reply);
-            MessageBoxW(h_wnd_, utf8_to_wstring("接口测试失败：\r\n" + reply).c_str(),
-                        L"测试失败", MB_OK | MB_ICONERROR);
-        } else {
-            log("接口测试通过，模型回复: " + reply);
-            MessageBoxW(h_wnd_, L"接口连通，大模型已就绪。", L"测试成功", MB_OK | MB_ICONINFORMATION);
+    std::thread([](MainWindow* self) {
+        TestResultPayload* p = new (std::nothrow) TestResultPayload();
+        if (!p) return;
+        p->ok = false;
+        try {
+            AIClient client(self->config_.ai);
+            std::string reply = client.chat("test_ping", "请回复两个字：收到");
+            p->ok = reply.find("【AI") == std::string::npos;
+            p->detail = reply;
+        } catch (const std::exception& e) {
+            p->detail = e.what();
+        } catch (...) {
+            p->detail = "unknown error";
         }
-    }).detach();
+        if (self->h_wnd_) {
+            PostMessageW(self->h_wnd_, WM_APP_TEST_DONE, 0, (LPARAM)p);
+        } else {
+            delete p;
+        }
+    }, this).detach();
 }
 
 void MainWindow::log(const std::string& message) {
@@ -1143,6 +1272,20 @@ void MainWindow::log_update_follow() {
     log_follow_ = (top + perPage >= count);
 }
 
+// 拖动被系统强行终止（Alt / Esc / 弹窗 / 切窗口）时调用：
+// 把卡内控件恢复显示，否则卡片会永久变成空白
+void MainWindow::abort_drag() {
+    if (drag_mode_ == 0) return;
+    int id = drag_mod_;
+    drag_mode_ = 0;
+    drag_mod_ = -1;
+    if (destroying_ || id < 0 || id >= MOD_COUNT || !mod_wnd_[id]) return;
+    set_card_controls_visible(id, true);
+    relayout_module(id);
+    RedrawWindow(mod_wnd_[id], NULL, NULL,
+                 RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+}
+
 void MainWindow::run_message_loop() {
     MSG msg = {};
     while (GetMessageW(&msg, NULL, 0, 0)) {
@@ -1163,7 +1306,7 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lParam;
         self = (MainWindow*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)self);
-        self->init_sidebar(hwnd);
+        if (self) self->init_sidebar(hwnd);
         return 0;
     }
 
@@ -1178,7 +1321,7 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             GetClientRect(hwnd, &rc);
             PaintBuf pb;
             if (pb.begin(hdc, ps.rcPaint)) {
-                self->paint_main(pb.mem, rc, ps.rcPaint);
+                self->paint_main(pb.mem_dc(), rc, ps.rcPaint);
                 pb.end(hdc);
             }
         }
@@ -1214,10 +1357,10 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         if (row != self->hover_row_) {
             int old_row = self->hover_row_;
             self->hover_row_ = row;
+            // 每次变化都重新布防：否则第二次移出窗口可能收不到 WM_MOUSELEAVE
             TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
             TrackMouseEvent(&tme);
-            // 只重画受影响的两行，不再整条侧栏
-            if (old_row >= 0) {
+            if (old_row >= 0 && old_row < MOD_COUNT) {
                 RECT r = self->sidebar_row_rect(old_row);
                 InvalidateRect(hwnd, &r, FALSE);
             }
@@ -1235,6 +1378,9 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             self->hover_row_ = -1;
             InvalidateRect(hwnd, &r, FALSE);
         }
+        // 重新布防，保证下次移出还能收到
+        TRACKMOUSEEVENT tme = { sizeof(tme), TME_LEAVE, hwnd, 0 };
+        TrackMouseEvent(&tme);
         return 0;
     }
 
@@ -1262,7 +1408,7 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
-        if (!self || dis->CtlID != IDC_BTN_THEME) break;
+        if (!self || !dis || dis->CtlID != IDC_BTN_THEME) break;
         UiGdiCache& g = ui_gdi();
         bool hover = is_hovered(self->hovered_, IDC_BTN_THEME);
         bool pressed = (dis->itemState & ODS_SELECTED) != 0;
@@ -1273,7 +1419,8 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         HGDIOBJ old = SelectObject(dis->hDC, self->font_small_);
         SetBkMode(dis->hDC, TRANSPARENT);
         SetTextColor(dis->hDC, t.primary);
-        DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dis->hDC, txt, -1, &dis->rcItem,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dis->hDC, old);
         return TRUE;
     }
@@ -1283,23 +1430,39 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         return 0;
 
     case WM_COMMAND:
-        if (self && LOWORD(wParam) == IDC_BTN_THEME) {
+        if (self && LOWORD(wParam) == IDC_BTN_THEME && HIWORD(wParam) == BN_CLICKED) {
             self->apply_theme((theme_index() + 1) % kThemeCount, true);
             self->log(std::string("主题已切换: ") + wstring_to_utf8(std::wstring(theme().name)));
             return 0;
         }
         break;
 
+    case WM_APP_TEST_DONE: {
+        if (!self) break;
+        TestResultPayload* p = (TestResultPayload*)lParam;
+        if (p) {
+            if (p->ok) {
+                self->log("接口测试通过，模型回复: " + p->detail);
+                MessageBoxW(hwnd, L"接口连通，大模型已就绪。", L"测试成功", MB_OK | MB_ICONINFORMATION);
+            } else {
+                self->log("接口测试失败: " + p->detail);
+                MessageBoxW(hwnd, utf8_to_wstring("接口测试失败：\r\n" + p->detail).c_str(),
+                            L"测试失败", MB_OK | MB_ICONERROR);
+            }
+            delete p;
+        }
+        return 0;
+    }
+
     case WM_USER_LOG: {
-        if (!self) return 0;
+        if (!self || !self->h_wnd_) return 0;
         std::vector<std::string> batch;
         {
             std::lock_guard<std::mutex> lock(self->log_mutex_);
             batch.swap(self->pending_logs_);
         }
         if (batch.empty()) return 0;
-        // 极端刷屏时只保留最新的 200 条，避免一次塞爆列表
-        if (batch.size() > 200) batch.erase(batch.begin(), batch.end() - 200);
+        if (batch.size() > 400) batch.erase(batch.begin(), batch.end() - 400);
 
         auto now = std::chrono::system_clock::now();
         std::time_t tt = std::chrono::system_clock::to_time_t(now);
@@ -1317,8 +1480,12 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
                 std::wstring line = prefix.str() + utf8_to_wstring(m);
                 strip_emoji(line);
                 int idx = (int)SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)line.c_str());
-                if (idx >= 0) SendMessageW(lb, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)log_level_of(m));
-                if (m.find("[BotClient] -> 回复成功") != std::string::npos) self->total_msg_handled_++;
+                if (idx >= 0) {
+                    SendMessageW(lb, LB_SETITEMDATA, (WPARAM)idx, (LPARAM)log_level_of(m));
+                }
+                if (m.find("[BotClient] -> 回复成功") != std::string::npos) {
+                    self->total_msg_handled_++;
+                }
             }
             int count = (int)SendMessageW(lb, LB_GETCOUNT, 0, 0);
             if (count > kMaxLogLines) {
@@ -1330,15 +1497,19 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
             InvalidateRect(lb, NULL, FALSE);
         } else {
             for (const auto& m : batch) {
-                if (m.find("[BotClient] -> 回复成功") != std::string::npos) self->total_msg_handled_++;
+                if (m.find("[BotClient] -> 回复成功") != std::string::npos) {
+                    self->total_msg_handled_++;
+                }
             }
         }
-        // 状态刷新交给 400ms 定时器，不再每条日志全窗口重绘
         self->status_dirty_ = true;
         return 0;
     }
 
     case WM_DESTROY:
+        if (self) { self->destroying_ = true; self->abort_drag(); }
+        KillTimer(hwnd, kStatusTimer);
+        free_buf_pool();
         PostQuitMessage(0);
         return 0;
     }
@@ -1361,6 +1532,11 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         return 0;
     }
 
+    case WM_NCDESTROY:
+        // ctx 由 create_module 创建，随窗口销毁释放
+        if (ctx) { delete ctx; SetWindowLongPtrW(hwnd, GWLP_USERDATA, 0); }
+        break;
+
     case WM_ERASEBKGND:
         return 1;
 
@@ -1371,8 +1547,8 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             RECT rc;
             GetClientRect(hwnd, &rc);
             PaintBuf pb;
-            if (pb.begin(hdc, rc)) {   // 卡片整块进缓冲，保证圆角/阴影不被裁剪
-                self->paint_module_card(ctx->kind, pb.mem, rc);
+            if (pb.begin(hdc, ps.rcPaint)) {
+                self->paint_module_card(ctx->kind, pb.mem_dc(), rc, ps.rcPaint);
                 pb.end(hdc);
             }
         }
@@ -1420,6 +1596,10 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_SETCURSOR: {
         if (LOWORD(lParam) != HTCLIENT || !s_cur_arrow) break;
+        if (self && self->drag_mode_ != 0) {
+            SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
+            return TRUE;
+        }
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(hwnd, &pt);
@@ -1443,6 +1623,8 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             self->show_module(ctx->kind, false);
             return 0;
         }
+        if (cr.right - cr.left < Lay::MinCardW || cr.bottom - cr.top < Lay::MinCardH) return 0;
+
         if (pt.x >= cr.right - Lay::Grip && pt.y >= cr.bottom - Lay::Grip) {
             self->drag_mode_ = 2;
         } else if (pt.y < Lay::TitleH) {
@@ -1456,8 +1638,7 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         self->bring_to_front(ctx->kind);
         SetCapture(hwnd);
         SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
-        // 关键：拖动期间隐藏卡内控件，接下来只搬这 1 个窗口，
-        // 十几个子控件不会跟着被系统搬动、也不会各自重绘 → 不再抽动。
+        // 拖动期间隐藏卡内控件：只剩 1 个窗口在动，十几个子控件不会各自重绘
         self->set_card_controls_visible(ctx->kind, false);
         return 0;
     }
@@ -1473,8 +1654,8 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             rc.top += delta.y;  rc.bottom += delta.y;
         } else {
             rc.right += delta.x; rc.bottom += delta.y;
-            if (rc.right - rc.left < 240) rc.right = rc.left + 240;
-            if (rc.bottom - rc.top < 120) rc.bottom = rc.top + 120;
+            if (rc.right - rc.left < Lay::MinCardW) rc.right = rc.left + Lay::MinCardW;
+            if (rc.bottom - rc.top < Lay::MinCardH) rc.bottom = rc.top + Lay::MinCardH;
         }
 
         RECT parent_rc;
@@ -1492,26 +1673,37 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             rc.right == old.right && rc.bottom == old.bottom) return 0;
         self->mod_rect_[ctx->kind] = rc;
 
+        // SWP_NOCOPYBITS：强制只重画暴露区域，避免整块拷贝放大开销
         if (self->drag_mode_ == 1) {
             SetWindowPos(hwnd, NULL, rc.left, rc.top, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
         } else {
             SetWindowPos(hwnd, NULL, rc.left, rc.top, w, h,
-                         SWP_NOZORDER | SWP_NOACTIVATE);
+                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
         }
         // 补画卡片让出来的那块背景
         InvalidateRect(GetParent(hwnd), &old, FALSE);
         return 0;
     }
 
+    case WM_CANCELMODE:
+        // Alt / Esc / 弹窗 等导致捕获被系统收回：必须还原控件，否则卡片永久空白
+        if (self && self->drag_mod_ >= 0) self->abort_drag();
+        break;
+
+    case WM_CAPTURECHANGED:
+        // 捕获被别的窗口拿走（Alt+Tab 等），同样还原
+        if (self && self->drag_mode_ != 0 && (HWND)lParam != hwnd) self->abort_drag();
+        break;
+
     case WM_LBUTTONUP: {
-        if (!self || self->drag_mode_ == 0) break;
-        ReleaseCapture();
+        if (!self || self->drag_mode_ == 0 || self->drag_mod_ != ctx->kind) break;
         int id = self->drag_mod_;
         self->drag_mode_ = 0;
         self->drag_mod_ = -1;
+        if (GetCapture() == hwnd) ReleaseCapture();   // 先清状态再释放，避免重复回调
 
-        // 卡片已在目标位置；子控件相对位置不变，只需一次性批量恢复显示
+        // 卡片已在目标位置；子控件相对位置不变，一次性批量恢复显示
         self->set_card_controls_visible(id, true);
         self->relayout_module(id);
         if (self->mod_wnd_[id]) {
@@ -1528,7 +1720,7 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lParam;
-        if (!self) break;
+        if (!self || !dis) break;
         UiGdiCache& g = ui_gdi();
 
         // ---- 日志行：只画可见行，代价与总行数无关 ----
@@ -1546,11 +1738,15 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             }
             FillRect(dis->hDC, &dis->rcItem, bg);
 
-            LONG len = (LONG)SendMessageW(dis->hwndItem, LB_GETTEXTLEN, (WPARAM)dis->itemID, 0);
+            // 用栈上缓冲区：不用成员变量，避免消息重入时被改写
+            int len = (int)SendMessageW(dis->hwndItem, LB_GETTEXTLEN, (WPARAM)dis->itemID, 0);
             if (len < 0) len = 0;
-            self->log_buf_.assign((size_t)len + 2, L'\0');
-            SendMessageW(dis->hwndItem, LB_GETTEXT, (WPARAM)dis->itemID,
-                         (LPARAM)self->log_buf_.data());
+            if (len > 4000) len = 4000;
+            wchar_t tmp[4004];
+            tmp[0] = L'\0';
+            if (len > 0) {
+                SendMessageW(dis->hwndItem, LB_GETTEXT, (WPARAM)dis->itemID, (LPARAM)tmp);
+            }
 
             HGDIOBJ old = SelectObject(dis->hDC, self->font_log_);
             SetBkMode(dis->hDC, TRANSPARENT);
@@ -1558,7 +1754,7 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             RECT tr = dis->rcItem;
             tr.left += 6;
             tr.right -= 4;
-            DrawTextW(dis->hDC, self->log_buf_.data(), -1, &tr,
+            DrawTextW(dis->hDC, tmp, -1, &tr,
                       DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS | DT_NOPREFIX);
             SelectObject(dis->hDC, old);
             return TRUE;
@@ -1579,7 +1775,8 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             HGDIOBJ old = SelectObject(dis->hDC, self->font_h2_);
             SetBkMode(dis->hDC, TRANSPARENT);
             SetTextColor(dis->hDC, RGB(255, 255, 255));
-            DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(dis->hDC, txt, -1, &dis->rcItem,
+                      DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
             SelectObject(dis->hDC, old);
             return TRUE;
         }
@@ -1590,23 +1787,28 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         HGDIOBJ old = SelectObject(dis->hDC, self->font_body_bold_);
         SetBkMode(dis->hDC, TRANSPARENT);
         SetTextColor(dis->hDC, t.text_main);
-        DrawTextW(dis->hDC, txt, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+        DrawTextW(dis->hDC, txt, -1, &dis->rcItem,
+                  DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
         SelectObject(dis->hDC, old);
         return TRUE;
     }
 
     case WM_COMMAND: {
         if (!self) break;
-        switch (LOWORD(wParam)) {
-        case IDC_BTN_TOGGLE_BOT: self->action_toggle_bot(); break;
+        int id = LOWORD(wParam);
+        // 只有按钮的 BN_CLICKED 才响应；过滤编辑框的 EN_* 与列表框通知
+        if (HIWORD(wParam) != BN_CLICKED) break;
+        switch (id) {
+        case IDC_BTN_TOGGLE_BOT:  self->action_toggle_bot(); break;
         case IDC_BTN_SAVE_CONFIG: self->action_save_config(); break;
-        case IDC_BTN_TEST_API: self->action_test_api(); break;
+        case IDC_BTN_TEST_API:    self->action_test_api(); break;
         case IDC_BTN_CLEAR_LOG:
-            SendMessageW(self->list_log_, LB_RESETCONTENT, 0, 0);
+            if (self->list_log_) SendMessageW(self->list_log_, LB_RESETCONTENT, 0, 0);
             self->log_follow_ = true;
             self->log("日志已清空");
             break;
         case IDC_BTN_RELOAD_PLUGINS:
+            self->plugin_cache_.clear();
             PluginManager::get_instance().load_plugins("plugins");
             self->refresh_plugin_ui();
             self->log("插件已重新加载");
@@ -1635,8 +1837,10 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
                 self->clamp_module(k);
                 self->relayout_module(k);
             }
+            for (int k = 0; k < MOD_COUNT; ++k) self->z_order_[k] = k;
+            self->apply_z_order();
             self->save_layout();
-            InvalidateRect(self->h_wnd_, NULL, FALSE);
+            if (self->h_wnd_) InvalidateRect(self->h_wnd_, NULL, FALSE);
             self->log("布局已重置");
             break;
         }
