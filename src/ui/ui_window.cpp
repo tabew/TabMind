@@ -148,7 +148,20 @@ MainWindow& MainWindow::get_instance() {
     return instance;
 }
 
+static HCURSOR s_cur_arrow = nullptr;
+static HCURSOR s_cur_sizeall = nullptr;
+static HCURSOR s_cur_sizenwse = nullptr;
+static HCURSOR s_cur_hand = nullptr;
+
+static void ensure_cursors() {
+    if (!s_cur_arrow)    s_cur_arrow   = LoadCursor(NULL, IDC_ARROW);
+    if (!s_cur_sizeall)  s_cur_sizeall = LoadCursor(NULL, IDC_SIZEALL);
+    if (!s_cur_sizenwse) s_cur_sizenwse= LoadCursor(NULL, IDC_SIZENWSE);
+    if (!s_cur_hand)     s_cur_hand    = LoadCursor(NULL, IDC_HAND);
+}
+
 void MainWindow::init_gdi_resources() {
+    ensure_cursors();
     auto mk = [](int h, int weight, const wchar_t* face) {
         return CreateFontW(-h, 0, 0, 0, weight, FALSE, FALSE, FALSE,
                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -657,27 +670,18 @@ void MainWindow::clamp_module(int kind) {
 }
 
 void MainWindow::set_card_redraw(int kind, bool on) {
+    // 只冻子控件，卡片本体保持可绘制。
+    // 若把卡片本身也冻上，拖动期间画面就不动了（卡片跟不上鼠标），
+    // 缩放时还会残留上一帧的像素，出现「花掉」的 bug。
     if (kind < 0 || kind >= MOD_COUNT) return;
     HWND c = mod_wnd_[kind];
-
-    if (on) {
-        // 解冻必须先子控件、后卡片，否则卡片重绘时子控件还处于冻结态，画不出来
-        for (HWND h : mod_ctl_[kind]) {
-            if (h) SendMessageW(h, WM_SETREDRAW, TRUE, 0);
-        }
-        if (c) {
-            SendMessageW(c, WM_SETREDRAW, TRUE, 0);
-            // 一次性整体重绘，把拖动期间攒下的区域补齐
-            RedrawWindow(c, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-            InvalidateRect(h_wnd_, NULL, TRUE);
-        }
-        return;
-    }
-
-    // 冻结：先卡片、后子控件
-    if (c) SendMessageW(c, WM_SETREDRAW, FALSE, 0);
     for (HWND h : mod_ctl_[kind]) {
-        if (h) SendMessageW(h, WM_SETREDRAW, FALSE, 0);
+        if (h) SendMessageW(h, WM_SETREDRAW, on ? TRUE : FALSE, 0);
+    }
+    if (on && c) {
+        // 松手后把子控件区域一次性补齐
+        RedrawWindow(c, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        InvalidateRect(h_wnd_, NULL, TRUE);
     }
 }
 
@@ -1200,14 +1204,12 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
     }
 
     case WM_SETCURSOR:
-        if (LOWORD(lParam) == HTCLIENT) {
+        if (LOWORD(lParam) == HTCLIENT && s_cur_arrow) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(hwnd, &pt);
-            if (pt.x < Lay::SidebarW) {
-                SetCursor(LoadCursor(NULL, IDC_HAND));
-                return TRUE;
-            }
+            SetCursor(pt.x < Lay::SidebarW ? s_cur_hand : s_cur_arrow);
+            return TRUE;
         }
         break;
 
@@ -1395,7 +1397,7 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         self->drag_rc0_ = self->mod_rect_[ctx->kind];
         self->bring_to_front(ctx->kind);
         SetCapture(hwnd);
-        SetCursor(LoadCursor(NULL, self->drag_mode_ == 2 ? IDC_SIZENWSE : IDC_SIZEALL));
+        SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
         // 拖动期间冻结卡片及其子控件的重绘：卡片内含十几个控件，每次鼠标移动
         // 都让它们重画一遍就是卡顿的直接原因；松手时统一重绘一次即可
         self->set_card_redraw(ctx->kind, false);
@@ -1403,18 +1405,18 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
     }
 
     case WM_SETCURSOR: {
-        if (!self || LOWORD(lParam) != HTCLIENT) break;
+        if (LOWORD(lParam) != HTCLIENT || !s_cur_arrow) break;
         POINT pt;
         GetCursorPos(&pt);
         ScreenToClient(hwnd, &pt);
         RECT cr;
         GetClientRect(hwnd, &cr);
         if (pt.x >= cr.right - Lay::Grip && pt.y >= cr.bottom - Lay::Grip) {
-            SetCursor(LoadCursor(NULL, IDC_SIZENWSE));
+            SetCursor(s_cur_sizenwse);
         } else if (pt.y < Lay::TitleH) {
-            SetCursor(LoadCursor(NULL, IDC_SIZEALL));
+            SetCursor(s_cur_sizeall);
         } else {
-            SetCursor(LoadCursor(NULL, IDC_ARROW));
+            SetCursor(s_cur_arrow);
         }
         return TRUE;
     }
