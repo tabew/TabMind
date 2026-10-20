@@ -178,7 +178,7 @@ void draw_button(const DRAWITEMSTRUCT* dis, COLORREF bg, COLORREF fg, COLORREF b
 // ===========================================================================
 // 高级设置
 // ===========================================================================
-const wchar_t* kAdvClass = L"QQBotAI_AdvSettings";
+const wchar_t* kAdvClass = L"TabMind_AdvSettings";
 const int IDC_ADV_TEMP      = 2001;
 const int IDC_ADV_TOKENS    = 2002;
 const int IDC_ADV_ROUNDS    = 2003;
@@ -370,7 +370,7 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // ===========================================================================
 // 插件管理
 // ===========================================================================
-const wchar_t* kPluginClass = L"QQBotAI_PluginMgr";
+const wchar_t* kPluginClass = L"TabMind_PluginMgr";
 const int IDC_PLG_LIST    = 2101;
 const int IDC_PLG_RELOAD  = 2102;
 const int IDC_PLG_OPENDIR = 2103;
@@ -517,7 +517,7 @@ LRESULT CALLBACK plg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 // ===========================================================================
 // 使用说明
 // ===========================================================================
-const wchar_t* kHelpClass = L"QQBotAI_HelpWnd";
+const wchar_t* kHelpClass = L"TabMind_HelpWnd";
 const int IDC_HELP_TEXT  = 2201;
 const int IDC_HELP_CLOSE = 2202;
 

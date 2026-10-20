@@ -24,7 +24,7 @@ timeout /t 5 /nobreak >nul
 
 :: 3. 启动 QQBotAI 客户端
 echo [2/2] 正在启动 QQBotAI 主程序...
-start "" "%~dp0QQBotAI.exe"
+start "" "%~dp0TabMind.exe"
 
 echo.
 echo ========================================================

@@ -8,10 +8,10 @@ echo ========================================================
 echo.
 
 :loop
-echo [%date% %time%] 正在启动 QQBotAI.exe...
-QQBotAI.exe
+echo [%date% %time%] 正在启动 TabMind.exe...
+TabMind.exe
 echo.
-echo [警告] 检测到 QQBotAI.exe 退出或关闭！
+echo [警告] 检测到 TabMind.exe 退出或关闭！
 echo [%date% %time%] 将在 3 秒后自动重新启动机器人进程...
 timeout /t 3 /nobreak >nul
 goto loop

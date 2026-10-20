@@ -1,4 +1,6 @@
-# QQBotAI — 零依赖 C++17 QQ AI 机器人框架
+# TabMind — 零依赖 C++17 QQ AI 机器人框架
+
+> **TabMind** = Tab + Mind · 由 tabew 打造的 QQ 智能体管理终端
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue.svg)]()
@@ -37,7 +39,7 @@
 
 **方式 A：Visual Studio（推荐）**
 
-双击打开 `QQBotAI.sln` → 选择 `Release | x64` → 生成。产物在 `bin\Release\QQBotAI.exe`。
+双击打开 `TabMind.sln` → 选择 `Release | x64` → 生成。产物在 `bin\Release\TabMind.exe`。
 
 **方式 B：CMake**
 
@@ -54,7 +56,7 @@ cl /nologo /c /std:c++17 /utf-8 /EHsc /O2 /MT /D NOMINMAX /D _CRT_SECURE_NO_WARN
    /D NDEBUG /D _WINDOWS /I include ^
    src\core\main.cpp src\core\bot_client.cpp src\ai\ai_client.cpp ^
    src\message\message_handler.cpp src\plugin\plugin_manager.cpp src\ui\ui_window.cpp
-link /SUBSYSTEM:WINDOWS /OUT:QQBotAI.exe *.obj ^
+link /SUBSYSTEM:WINDOWS /OUT:TabMind.exe *.obj ^
    winhttp.lib ws2_32.lib crypt32.lib comctl32.lib uxtheme.lib dwmapi.lib gdiplus.lib msimg32.lib
 ```
 
@@ -69,14 +71,14 @@ link /SUBSYSTEM:WINDOWS /OUT:QQBotAI.exe *.obj ^
 
 ### 4. 运行
 
-双击 `bin\Release\QQBotAI.exe`（或 `QQBotAI.exe`），窗口内点「启动机器人」。
+双击 `bin\Release\TabMind.exe`（或 `TabMind.exe`），窗口内点「启动机器人」。
 
 ---
 
 ## 目录结构
 
 ```text
-QQBotAI/
+TabMind/
 ├── src/
 │   ├── core/      main.cpp（入口）、bot_client.cpp（OneBot WebSocket 连接）
 │   ├── ai/        ai_client.cpp（大模型调用 / 记忆 / 多模态）
@@ -90,7 +92,7 @@ QQBotAI/
 ├── plugins/       ⚠ 插件目录：*.dll 放这里，启动时自动加载
 ├── docs/          架构说明、插件开发指南
 ├── config.example.json
-└── QQBotAI.sln
+└── TabMind.sln
 ```
 
 ---

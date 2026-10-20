@@ -159,7 +159,7 @@ namespace simplews {
 
             if (!is_running_) return false;
 
-            HINTERNET sess = WinHttpOpen(L"QQBotAI-WS/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+            HINTERNET sess = WinHttpOpen(L"TabMind-WS/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
             if (!sess) return false;
             h_session_ = sess;
 

@@ -273,7 +273,7 @@ bool MainWindow::create_and_show(HINSTANCE hInstance, int nCmdShow) {
 
     init_gdi_resources();
 
-    const wchar_t CLASS_NAME[] = L"QQBotAI_Resizable_Window";
+    const wchar_t CLASS_NAME[] = L"TabMind_Resizable_Window";
 
     WNDCLASSW wc = {};
     wc.lpfnWndProc = MainWindow::window_proc;
@@ -298,7 +298,7 @@ bool MainWindow::create_and_show(HINSTANCE hInstance, int nCmdShow) {
 
     h_wnd_ = CreateWindowExW(
         0, CLASS_NAME,
-        L"QQBotAI · 智能聊天机器人管理终端",
+        L"TabMind · 智能聊天机器人管理终端",
         WS_OVERLAPPEDWINDOW | WS_CLIPCHILDREN,
         pos_x, pos_y, win_w, win_h,
         NULL, NULL, hInstance, this
@@ -910,12 +910,12 @@ LRESULT CALLBACK MainWindow::window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, RGB(255, 255, 255));
             RECT t = rcLogo;
-            DrawTextW(hdc, L"Q", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            DrawTextW(hdc, L"T", -1, &t, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             SelectObject(hdc, old);
         }
 
-        draw_section_title(hdc, Lay::LeftX + 48, 16, L"QQBotAI", self->font_brand_);
-        draw_caption(hdc, Lay::LeftX + 50, 40, 320, L"智能聊天机器人 · OneBot v11", self->font_small_);
+        draw_section_title(hdc, Lay::LeftX + 48, 16, L"TabMind", self->font_brand_);
+        draw_caption(hdc, Lay::LeftX + 50, 40, 320, L"AI Agent Console · OneBot v11", self->font_small_);
 
         // 右侧状态胶囊
         {
