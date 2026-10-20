@@ -1,5 +1,9 @@
 # QQBotAI — 零依赖 C++17 QQ AI 机器人框架
 
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+[![Platform](https://img.shields.io/badge/platform-Windows%20x64-blue.svg)]()
+[![C++](https://img.shields.io/badge/C%2B%2B-17-00599C.svg)]()
+
 基于 **C++17 + Win32 原生 GUI** 的 QQ AI 机器人框架，通过标准 **OneBot v11** 协议（NapCat / LLOneBot / Lagrange）对接 QQ。
 **不依赖任何第三方库**：HTTP、WebSocket、JSON 全部是自带的轻量实现，只要有 Windows SDK 就能编译。
 
@@ -160,4 +164,16 @@ extern "C" __declspec(dllexport) void destroy_plugin(IBotPlugin* p) { delete p; 
 
 ## License
 
-未指定。如需开源请自行补充 LICENSE 文件。
+本项目采用 [MIT License](LICENSE) 开源。
+
+```
+MIT License
+
+Copyright (c) 2026 tabew
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction...
+```
+
+可以自由使用、修改、分发、商用，唯一要求是保留版权声明与许可声明。
