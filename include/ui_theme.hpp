@@ -132,6 +132,84 @@ inline void ui_draw_card(HDC hdc, const RECT& rc, int radius = 12) {
     ui_fill_round(hdc, rc, radius, t.card_bg, t.border);
 }
 
+// ---------------------------------------------------------------------------
+// GDI 对象缓存
+// 之前每画一次圆角/一次色块就 CreateSolidBrush + CreatePen，画完再 Delete，
+// 一帧下来几十次内核对象创建销毁，是卡顿的直接来源之一。
+// 这里按主题一次性建好，绘制路径只做 SelectObject。
+// ---------------------------------------------------------------------------
+struct UiGdiCache {
+    HBRUSH br_win = nullptr, br_card = nullptr, br_field = nullptr, br_log = nullptr;
+    HBRUSH br_shadow = nullptr, br_border = nullptr, br_text_faint = nullptr;
+    HBRUSH br_primary = nullptr, br_primary_soft = nullptr;
+    HBRUSH br_success = nullptr, br_success_soft = nullptr;
+    HBRUSH br_danger = nullptr, br_danger_soft = nullptr;
+    HPEN pen_border = nullptr, pen_border_soft = nullptr, pen_primary = nullptr;
+    HPEN pen_text_sub = nullptr, pen_null = nullptr;
+
+    void clear() {
+        HBRUSH brs[] = { br_win, br_card, br_field, br_log, br_shadow, br_border, br_text_faint,
+                         br_primary, br_primary_soft, br_success, br_success_soft,
+                         br_danger, br_danger_soft };
+        for (HBRUSH b : brs) if (b) DeleteObject(b);
+        HPEN pens[] = { pen_border, pen_border_soft, pen_primary, pen_text_sub, pen_null };
+        for (HPEN p : pens) if (p) DeleteObject(p);
+        *this = UiGdiCache{};
+    }
+
+    void build() {
+        clear();
+        const ThemePalette& t = theme();
+        br_win          = CreateSolidBrush(t.win_bg);
+        br_card         = CreateSolidBrush(t.card_bg);
+        br_field        = CreateSolidBrush(t.field_bg);
+        br_log          = CreateSolidBrush(t.log_bg);
+        br_shadow       = CreateSolidBrush(t.shadow);
+        br_border       = CreateSolidBrush(t.border);
+        br_text_faint   = CreateSolidBrush(t.text_faint);
+        br_primary      = CreateSolidBrush(t.primary);
+        br_primary_soft = CreateSolidBrush(t.primary_soft);
+        br_success      = CreateSolidBrush(t.success);
+        br_success_soft = CreateSolidBrush(t.success_soft);
+        br_danger       = CreateSolidBrush(t.danger);
+        br_danger_soft  = CreateSolidBrush(t.danger_soft);
+        pen_border      = CreatePen(PS_SOLID, 1, t.border);
+        pen_border_soft = CreatePen(PS_SOLID, 1, t.border_soft);
+        pen_primary     = CreatePen(PS_SOLID, 1, t.primary);
+        pen_text_sub    = CreatePen(PS_SOLID, 2, t.text_sub);
+        pen_null        = CreatePen(PS_NULL, 0, 0);
+    }
+};
+
+inline UiGdiCache& ui_gdi() { static UiGdiCache cache; return cache; }
+
+// 用缓存对象画圆角矩形（绘制热路径专用）
+inline void ui_round(HDC hdc, const RECT& rc, int rx, int ry, HBRUSH br, HPEN pen) {
+    HGDIOBJ ob = SelectObject(hdc, br);
+    HGDIOBJ op = SelectObject(hdc, pen);
+    RoundRect(hdc, rc.left, rc.top, rc.right, rc.bottom, rx, ry);
+    SelectObject(hdc, ob);
+    SelectObject(hdc, op);
+}
+
+inline void ui_round_ltwh(HDC hdc, int l, int t, int r, int b, int rr, HBRUSH br, HPEN pen) {
+    RECT rc = { l, t, r, b };
+    ui_round(hdc, rc, rr, rr, br, pen);
+}
+
+inline void ui_pill(HDC hdc, const RECT& rc, HBRUSH br, HPEN pen, COLORREF fg,
+                    const std::wstring& text, HFONT font) {
+    int rr = (rc.bottom - rc.top) / 2;
+    ui_round(hdc, rc, rr, rr, br, pen);
+    HGDIOBJ old = SelectObject(hdc, font);
+    SetBkMode(hdc, TRANSPARENT);
+    SetTextColor(hdc, fg);
+    RECT tr = rc;
+    DrawTextW(hdc, text.c_str(), -1, &tr,
+              DT_CENTER | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+    SelectObject(hdc, old);
+}
+
 inline void ui_draw_pill(HDC hdc, const RECT& rc, COLORREF bg, COLORREF fg,
                          const std::wstring& text, HFONT font) {
     ui_fill_round(hdc, rc, rc.bottom - rc.top, bg);

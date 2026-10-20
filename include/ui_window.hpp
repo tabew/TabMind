@@ -4,18 +4,27 @@
 #include <string>
 #include <memory>
 #include <vector>
-#include <set>
 #include <mutex>
 #include "config.hpp"
 #include "bot_client.hpp"
 #include "plugin_manager.hpp"
+#include "ui_theme.hpp"
 
 #define WM_USER_LOG (WM_USER + 101)
-#define WM_USER_STATUS_UPDATE (WM_USER + 102)
 
-// 单窗口 + 左侧菜单 + 右侧嵌入式卡片。
-// 每个功能块是一个 WS_CHILD 子窗口：拖动只移动该子窗口，父窗口不重绘，
-// 所以既有「自由摆放」的手感，又不会像整窗重绘那样卡。
+// ---------------------------------------------------------------------------
+// TabMind UI v2
+//
+// 单主窗口 + 左侧菜单 + 右侧自由摆放的嵌入式卡片。
+//
+// 相比 v1 的关键变更（针对"卡顿 / 抽动"）：
+//   1. 所有绘制走「内存 DC → 一次 BitBlt」的双缓冲，消除闪烁与撕裂；
+//   2. 画刷/画笔按主题缓存在 ui_gdi()，绘制路径不再 Create/Delete GDI 对象；
+//   3. 日志控件从 RichEdit 换成自绘 LISTBOX，只画可见行、不再整篇重排；
+//   4. 状态刷新走 400ms 定时器 + 脏标记，不再每条日志全窗口 Invalidate；
+//   5. 拖动卡片时先隐藏卡内控件，只移动 1 个窗口；松手用 DeferWindowPos 原子复位；
+//   6. 侧栏 hover 只重画受影响的两行；卡片 z 序只在真正变化时调整。
+// ---------------------------------------------------------------------------
 class MainWindow {
 public:
     static MainWindow& get_instance();
@@ -24,20 +33,17 @@ public:
     void run_message_loop();
     void log(const std::string& message);
 
-    // ---- 供模块子窗口使用 ----
     AppConfig& config() { return config_; }
     HFONT font_body() const { return font_body_; }
     HFONT font_body_bold() const { return font_body_bold_; }
     HFONT font_small() const { return font_small_; }
     HFONT font_h2() const { return font_h2_; }
-    HBRUSH brush_win() const { return brush_win_bg_; }
-    HBRUSH brush_card() const { return brush_card_bg_; }
-    HBRUSH brush_field() const { return brush_field_bg_; }
-    HBRUSH brush_log() const { return brush_log_bg_; }
+    HBRUSH brush_win() const { return ui_gdi().br_win; }
+    HBRUSH brush_card() const { return ui_gdi().br_card; }
+    HBRUSH brush_field() const { return ui_gdi().br_field; }
+    HBRUSH brush_log() const { return ui_gdi().br_log; }
     bool is_running() const { return is_bot_running_; }
     int msg_count() const { return total_msg_handled_; }
-    bool log_is_riched() const { return log_is_riched_; }
-    HWND log_edit() const { return edit_log_; }
 
     void action_toggle_bot();
     void action_save_config();
@@ -71,16 +77,15 @@ private:
 
     HWND mod_wnd_[MOD_COUNT] = {};
     bool mod_open_[MOD_COUNT] = {};
-    RECT mod_rect_[MOD_COUNT] = {};      // 主窗口客户区坐标
+    RECT mod_rect_[MOD_COUNT] = {};                 // 主窗口客户区坐标
     std::vector<HWND> mod_ctl_[MOD_COUNT];
+    int z_order_[MOD_COUNT] = { 0, 1, 2, 3, 4, 5 }; // 由下到上
 
-    // 卡片拖动/缩放状态（预览框方案：拖动期间不挪窗口，松手才落位）
-    int drag_mode_ = 0;                  // 0 无 / 1 移动 / 2 缩放
+    // 拖动/缩放状态
+    int drag_mode_ = 0;                 // 0 无 / 1 移动 / 2 缩放
     int drag_mod_ = -1;
     POINT drag_pt_ = {};
     RECT drag_rc0_ = {};
-    RECT drag_outline_ = {};             // 当前预览框（屏幕坐标）
-    RECT drag_target_ = {};              // 落位矩形（主窗口客户区坐标）
 
     // AI
     HWND edit_api_key_ = nullptr;
@@ -101,6 +106,7 @@ private:
     HWND btn_reload_plugins_ = nullptr;
     HWND btn_open_plugin_dir_ = nullptr;
     HWND btn_plugin_mgr_ = nullptr;
+    std::vector<PluginInfo> plugin_cache_;
     // 操作
     HWND btn_toggle_bot_ = nullptr;
     HWND btn_save_config_ = nullptr;
@@ -108,20 +114,21 @@ private:
     HWND btn_advanced_ = nullptr;
     HWND btn_help_ = nullptr;
     HWND btn_reset_layout_ = nullptr;
-    // 日志
-    HWND edit_log_ = nullptr;
+    // 日志（自绘 LISTBOX）
+    HWND list_log_ = nullptr;
     HWND btn_clear_log_ = nullptr;
-    bool log_is_riched_ = false;
+    bool log_follow_ = true;
+    std::vector<wchar_t> log_buf_;
 
-    // 运行状态
     AppConfig config_;
     std::unique_ptr<BotClient> bot_client_;
     bool is_bot_running_ = false;
     int total_msg_handled_ = 0;
+    bool status_dirty_ = false;
     std::mutex log_mutex_;
     std::vector<std::string> pending_logs_;
 
-    std::set<int> hovered_;
+    std::vector<int> hovered_;
 
     HFONT font_brand_ = nullptr;
     HFONT font_h2_ = nullptr;
@@ -129,10 +136,6 @@ private:
     HFONT font_body_bold_ = nullptr;
     HFONT font_small_ = nullptr;
     HFONT font_log_ = nullptr;
-    HBRUSH brush_win_bg_ = nullptr;
-    HBRUSH brush_card_bg_ = nullptr;
-    HBRUSH brush_field_bg_ = nullptr;
-    HBRUSH brush_log_bg_ = nullptr;
 
     void init_gdi_resources();
     void apply_theme(int index, bool persist);
@@ -140,22 +143,25 @@ private:
     void init_sidebar(HWND hwnd);
     void paint_main(HDC hdc, const RECT& rc, const RECT& rcPaint);
     int sidebar_row_at(POINT pt) const;
+    RECT sidebar_row_rect(int row) const;
 
     void create_module_windows();
     void create_module(int kind);
     void show_module(int kind, bool open);
     void bring_to_front(int kind);
+    void apply_z_order();
+    void set_card_controls_visible(int kind, bool show);
     void relayout_module(int kind);
     void paint_module_card(int kind, HDC hdc, const RECT& rc);
     RECT default_module_rect(int kind) const;
     void clamp_module(int kind);
     void save_layout();
-    void outline_rect(const RECT& rc);        // XOR 反色预览框
 
     void load_config_to_ui();
     void save_ui_to_config();
     void update_status_ui();
-    void append_log_text(const std::wstring& text, const std::string& raw_for_scan);
+    void log_scroll_bottom();
+    void log_update_follow();
 
     static const wchar_t* module_title(int kind);
 
