@@ -45,9 +45,22 @@ struct AIConfig {
     int reply_cooldown_sec = 45;
 };
 
+// ---- 界面布局：模块可自由拖动/缩放，位置持久化到 config.json ----
+struct UILayoutItem {
+    int x = 0, y = 0, w = 0, h = 0;
+    bool visible = true;
+};
+
+struct UIConfig {
+    int theme = 0;                       // 主题索引（见 ui_theme.hpp）
+    bool locked = false;                 // 锁定布局：禁止拖动/缩放
+    std::vector<UILayoutItem> modules;   // 为空表示使用默认布局
+};
+
 struct AppConfig {
     OneBotConfig onebot;
     AIConfig ai;
+    UIConfig ui;
 
     static AppConfig load_from_file(const std::string& path = "config.json") {
         AppConfig config;
@@ -89,6 +102,25 @@ struct AppConfig {
                 if (ai.contains("auto_delete_images")) config.ai.auto_delete_images = ai["auto_delete_images"].get<bool>();
                 if (ai.contains("close_friends")) config.ai.close_friends = ai["close_friends"].get<std::vector<std::string>>();
                 if (ai.contains("reply_cooldown_sec")) config.ai.reply_cooldown_sec = ai["reply_cooldown_sec"].get<int>();
+            }
+
+            if (j.contains("ui")) {
+                auto uj = j["ui"];
+                if (uj.contains("theme")) config.ui.theme = uj["theme"].get<int>();
+                if (uj.contains("locked")) config.ui.locked = uj["locked"].get<bool>();
+                if (uj.contains("modules") && uj["modules"].is_array()) {
+                    config.ui.modules.clear();
+                    for (size_t i = 0; i < uj["modules"].size(); ++i) {
+                        auto m = uj["modules"][i];
+                        UILayoutItem it;
+                        if (m.contains("x")) it.x = m["x"].get<int>();
+                        if (m.contains("y")) it.y = m["y"].get<int>();
+                        if (m.contains("w")) it.w = m["w"].get<int>();
+                        if (m.contains("h")) it.h = m["h"].get<int>();
+                        if (m.contains("visible")) it.visible = m["visible"].get<bool>();
+                        config.ui.modules.push_back(it);
+                    }
+                }
             }
         } catch (const std::exception& e) {
             std::cerr << "[Config] 解析配置文件异常: " << e.what() << std::endl;
@@ -144,6 +176,22 @@ struct AppConfig {
         }
         ai_obj["reply_cooldown_sec"] = ai.reply_cooldown_sec;
         j["ai"] = ai_obj;
+
+        nlohmann::json ui_obj = nlohmann::json::object();
+        ui_obj["theme"] = ui.theme;
+        ui_obj["locked"] = ui.locked;
+        {
+            nlohmann::json mods = nlohmann::json::array();
+            for (const auto& m : ui.modules) {
+                nlohmann::json mo = nlohmann::json::object();
+                mo["x"] = m.x;  mo["y"] = m.y;
+                mo["w"] = m.w;  mo["h"] = m.h;
+                mo["visible"] = m.visible;
+                mods.push_back(mo);
+            }
+            ui_obj["modules"] = mods;
+        }
+        j["ui"] = ui_obj;
 
         std::ofstream file(path);
         if (file.is_open()) {

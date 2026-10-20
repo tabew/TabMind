@@ -107,6 +107,7 @@
     <ClInclude Include="include\simple_json.hpp" />
     <ClInclude Include="include\simple_ws.hpp" />
     <ClInclude Include="include\ui_dialogs.hpp" />
+    <ClInclude Include="include\ui_theme.hpp" />
     <ClInclude Include="include\ui_window.hpp" />
   </ItemGroup>
   <ItemGroup>

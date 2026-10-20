@@ -1,4 +1,5 @@
 #include "ui_dialogs.hpp"
+#include "ui_theme.hpp"
 #include "plugin_manager.hpp"
 
 #include <string>
@@ -13,14 +14,15 @@
 // ---------------------------------------------------------------------------
 namespace {
 
-const COLORREF kWinBg    = RGB(255, 255, 255);
-const COLORREF kCardBg   = RGB(255, 255, 255);
-const COLORREF kBorder   = RGB(226, 232, 240);
-const COLORREF kTextMain = RGB(15, 23, 42);
-const COLORREF kTextMuted= RGB(100, 116, 139);
-const COLORREF kPrimary  = RGB(79, 70, 229);
-const COLORREF kSuccess  = RGB(16, 185, 129);
-const COLORREF kDanger   = RGB(239, 68, 68);
+// 颜色全部跟随主界面主题（ui_theme.hpp）
+#define kWinBg     (theme().win_bg)
+#define kCardBg    (theme().card_bg)
+#define kBorder    (theme().border)
+#define kTextMain  (theme().text_main)
+#define kTextMuted (theme().text_sub)
+#define kPrimary   (theme().primary)
+#define kSuccess   (theme().success)
+#define kDanger    (theme().danger)
 
 std::wstring u8w(const std::string& s) {
     if (s.empty()) return L"";
@@ -291,6 +293,16 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_ERASEBKGND: {
+        HDC hdcE = (HDC)wp;
+        RECT rcE;
+        GetClientRect(hwnd, &rcE);
+        HBRUSH br = CreateSolidBrush(kWinBg);
+        FillRect(hdcE, &rcE, br);
+        DeleteObject(br);
+        return 1;
+    }
+
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lp;
         if (!ctx) break;
@@ -456,6 +468,16 @@ LRESULT CALLBACK plg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         return 0;
     }
 
+    case WM_ERASEBKGND: {
+        HDC hdcE = (HDC)wp;
+        RECT rcE;
+        GetClientRect(hwnd, &rcE);
+        HBRUSH br = CreateSolidBrush(kWinBg);
+        FillRect(hdcE, &rcE, br);
+        DeleteObject(br);
+        return 1;
+    }
+
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lp;
         if (!ctx) break;
@@ -578,6 +600,16 @@ LRESULT CALLBACK help_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CreateWindowW(L"BUTTON", L"知道了", WS_VISIBLE | WS_CHILD | BS_OWNERDRAW,
                       456, 458, 120, 34, hwnd, (HMENU)(INT_PTR)IDC_HELP_CLOSE, nullptr, nullptr);
         return 0;
+    }
+
+    case WM_ERASEBKGND: {
+        HDC hdcE = (HDC)wp;
+        RECT rcE;
+        GetClientRect(hwnd, &rcE);
+        HBRUSH br = CreateSolidBrush(kWinBg);
+        FillRect(hdcE, &rcE, br);
+        DeleteObject(br);
+        return 1;
     }
 
     case WM_DRAWITEM: {

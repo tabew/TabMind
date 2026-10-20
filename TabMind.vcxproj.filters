@@ -27,6 +27,9 @@
     <ClInclude Include="include\bot_client.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
+    <ClInclude Include="include\ui_theme.hpp">
+      <Filter>头文件</Filter>
+    </ClInclude>
     <ClInclude Include="include\ui_dialogs.hpp">
       <Filter>头文件</Filter>
     </ClInclude>
