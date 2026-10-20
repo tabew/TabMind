@@ -1,0 +1,60 @@
+# ================= 构建产物 =================
+obj/
+bin/
+out/
+build/
+*.obj
+*.exe
+*.dll
+*.lib
+*.exp
+*.pdb
+*.ilk
+*.tlog
+*.lastbuildstate
+*.recipe
+*.iobj
+*.ipdb
+*.check_cache
+
+# ================= IDE / 缓存 =================
+.vs/
+*.user
+*.suo
+*.cache/
+.vscode/
+
+# ================= 插件（本仓库只发布框架，插件不随仓库分发） =================
+plugins/*
+!plugins/.gitkeep
+
+# ================= 运行时数据与日志 =================
+data/
+logs/
+*.log
+NapCat/
+QQBot_Server_Deploy/
+
+# ================= 本地敏感配置 =================
+# 含 API Key / 面板密钥，务必不要提交；仓库里只保留脱敏的 config.example.json
+config.json
+.env
+
+# ================= 备份 / 归档 / 本地脚本 =================
+_backup/
+archive/
+tools/
+
+# ================= 内部文档（含基础设施信息，不对外） =================
+docs/代码分类与规范审计.md
+docs/项目结构说明.md
+docs/住宅代理接入说明.md
+
+# ================= Python =================
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# ================= 其它工程 =================
+fly/

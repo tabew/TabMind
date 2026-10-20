@@ -1,0 +1,25 @@
+# QQBOT 代码风格（C++17 / MSVC）
+# 与现有代码保持一致：4 空格缩进、行宽 120、左花括号换行（Allman）
+---
+Language: Cpp
+Standard: c++17
+BasedOnStyle: Microsoft
+
+IndentWidth: 4
+TabWidth: 4
+UseTab: Never
+ColumnLimit: 120
+
+AccessModifierOffset: -4
+BreakBeforeBraces: Allman
+AllowShortFunctionsOnASingleLine: Inline
+AllowShortIfStatementsOnASingleLine: Never
+AllowShortLoopsOnASingleLine: false
+
+PointerAlignment: Left
+SpaceBeforeParens: ControlStatements
+IndentCaseLabels: false
+SortIncludes: false
+
+# 中文注释按显示宽度计算，避免误换行
+BreakStringLiterals: false

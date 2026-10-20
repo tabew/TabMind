@@ -1,0 +1,32 @@
+{
+    "ai": {
+        "api_key": "",
+        "auth_style": "api-key",
+        "auto_delete_images": true,
+        "base_url": "https://api.openai.com/v1",
+        "close_friends": [],
+        "enable_thinking": false,
+        "max_history_rounds": 10,
+        "max_tokens": 1000,
+        "memory_batch_size": 8,
+        "memory_max_chars": 1000,
+        "model": "gpt-4o-mini",
+        "reply_cooldown_sec": 45,
+        "system_prompt": "你是一个友好、简洁的 QQ 聊天助手。请用自然、口语化的中文回复，回答问题要直接，不要长篇大论。",
+        "temperature": 0.85,
+        "vision_model": ""
+    },
+    "onebot": {
+        "access_token": "",
+        "bot_qq": 1234567890,
+        "group_require_at": true,
+        "at_exempt_plugins": [],
+        "smart_reply": false,
+        "trigger_prefixes": [
+            "/chat",
+            "/ai",
+            "你好"
+        ],
+        "ws_url": "ws://127.0.0.1:3001"
+    }
+}
