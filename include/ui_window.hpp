@@ -74,11 +74,13 @@ private:
     RECT mod_rect_[MOD_COUNT] = {};      // 主窗口客户区坐标
     std::vector<HWND> mod_ctl_[MOD_COUNT];
 
-    // 卡片拖动/缩放状态
+    // 卡片拖动/缩放状态（预览框方案：拖动期间不挪窗口，松手才落位）
     int drag_mode_ = 0;                  // 0 无 / 1 移动 / 2 缩放
     int drag_mod_ = -1;
     POINT drag_pt_ = {};
     RECT drag_rc0_ = {};
+    RECT drag_outline_ = {};             // 当前预览框（屏幕坐标）
+    RECT drag_target_ = {};              // 落位矩形（主窗口客户区坐标）
 
     // AI
     HWND edit_api_key_ = nullptr;
@@ -148,7 +150,7 @@ private:
     RECT default_module_rect(int kind) const;
     void clamp_module(int kind);
     void save_layout();
-    void set_card_redraw(int kind, bool on);   // 拖动时冻结卡片重绘
+    void outline_rect(const RECT& rc);        // XOR 反色预览框
 
     void load_config_to_ui();
     void save_ui_to_config();

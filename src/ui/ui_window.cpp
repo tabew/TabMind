@@ -669,20 +669,21 @@ void MainWindow::clamp_module(int kind) {
     }
 }
 
-void MainWindow::set_card_redraw(int kind, bool on) {
-    // 只冻子控件，卡片本体保持可绘制。
-    // 若把卡片本身也冻上，拖动期间画面就不动了（卡片跟不上鼠标），
-    // 缩放时还会残留上一帧的像素，出现「花掉」的 bug。
-    if (kind < 0 || kind >= MOD_COUNT) return;
-    HWND c = mod_wnd_[kind];
-    for (HWND h : mod_ctl_[kind]) {
-        if (h) SendMessageW(h, WM_SETREDRAW, on ? TRUE : FALSE, 0);
-    }
-    if (on && c) {
-        // 松手后把子控件区域一次性补齐
-        RedrawWindow(c, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
-        InvalidateRect(h_wnd_, NULL, TRUE);
-    }
+void MainWindow::outline_rect(const RECT& rc) {
+    // 在桌面 DC 上用 R2_NOT 画反色矩形：同一矩形画两次即擦除。
+    // 拖动期间只画这个框，不移动任何窗口、不触发任何重绘，因此绝不会抽动。
+    HDC hdc = GetDC(NULL);
+    if (!hdc) return;
+    int old_rop = SetROP2(hdc, R2_NOT);
+    HPEN pen = CreatePen(PS_SOLID, 2, RGB(255, 255, 255));   // R2_NOT 下颜色无意义
+    HGDIOBJ old_pen = SelectObject(hdc, pen);
+    HGDIOBJ old_brush = SelectObject(hdc, GetStockObject(NULL_BRUSH));
+    Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+    SelectObject(hdc, old_pen);
+    SelectObject(hdc, old_brush);
+    SetROP2(hdc, old_rop);
+    DeleteObject(pen);
+    ReleaseDC(NULL, hdc);
 }
 
 void MainWindow::save_layout() {
@@ -1398,9 +1399,16 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         self->bring_to_front(ctx->kind);
         SetCapture(hwnd);
         SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
-        // 拖动期间冻结卡片及其子控件的重绘：卡片内含十几个控件，每次鼠标移动
-        // 都让它们重画一遍就是卡顿的直接原因；松手时统一重绘一次即可
-        self->set_card_redraw(ctx->kind, false);
+
+        // 预览框方案：拖动期间只画反色矩形，不做任何窗口移动，
+        // 不触发任何重绘，因此绝不抽动；松手时才一次性落位。
+        POINT org = { 0, 0 };
+        ClientToScreen(hwnd, &org);
+        const RECT& r0 = self->mod_rect_[ctx->kind];
+        self->drag_outline_ = { org.x + r0.left, org.y + r0.top,
+                                org.x + r0.right, org.y + r0.bottom };
+        self->drag_target_ = r0;
+        self->outline_rect(self->drag_outline_);
         return 0;
     }
 
@@ -1436,7 +1444,7 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             if (rc.bottom - rc.top < 120) rc.bottom = rc.top + 120;
         }
 
-        // 限制在卡片区域内
+        // 限制在主窗口工作区内
         RECT parent_rc;
         GetClientRect(GetParent(hwnd), &parent_rc);
         int w = rc.right - rc.left, h = rc.bottom - rc.top;
@@ -1447,20 +1455,37 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         rc.right = rc.left + w;
         rc.bottom = rc.top + h;
 
-        self->mod_rect_[ctx->kind] = rc;
-        SetWindowPos(hwnd, NULL, rc.left, rc.top, w, h, SWP_NOZORDER | SWP_NOACTIVATE);
+        self->drag_target_ = rc;
+
+        // 只搬预览框：擦旧的、画新的，一次 GDI 矩形，零窗口重绘
+        POINT org = { 0, 0 };
+        ClientToScreen(hwnd, &org);
+        RECT now = { org.x + rc.left, org.y + rc.top, org.x + rc.right, org.y + rc.bottom };
+        self->outline_rect(self->drag_outline_);   // 擦
+        self->outline_rect(now);                   // 画
+        self->drag_outline_ = now;
         return 0;
     }
-
     case WM_LBUTTONUP: {
         if (!self || self->drag_mode_ == 0) break;
         ReleaseCapture();
         int id = self->drag_mod_;
         self->drag_mode_ = 0;
         self->drag_mod_ = -1;
-        self->set_card_redraw(id, true);
+        self->outline_rect(self->drag_outline_);   // 擦掉预览框
+
+        // 一次性落位：整段拖动只在这一次真正移动/缩放窗口
+        RECT rc = self->drag_target_;
+        self->mod_rect_[id] = rc;
+        HWND c = self->mod_wnd_[id];
+        if (c) {
+            SetWindowPos(c, NULL, rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
+                         SWP_NOZORDER | SWP_NOACTIVATE);
+            self->relayout_module(id);
+            RedrawWindow(c, NULL, NULL, RDW_INVALIDATE | RDW_ALLCHILDREN | RDW_UPDATENOW);
+        }
         self->save_layout();
-        InvalidateRect(hwnd, NULL, FALSE);
+        InvalidateRect(self->h_wnd_, NULL, FALSE);
         return 0;
     }
 
