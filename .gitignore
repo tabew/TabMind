@@ -58,3 +58,10 @@ venv/
 
 # ================= 其它工程 =================
 fly/
+
+# ================= 本地工作文件（不属于框架源码） =================
+.workbuddy/
+CMakeSettings.json
+.env.example
+requirements.txt
+examples/
