@@ -65,3 +65,5 @@ CMakeSettings.json
 .env.example
 requirements.txt
 examples/
+vcpkg.json
+一键安装Python依赖.bat
