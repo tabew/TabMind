@@ -4,6 +4,7 @@
 #include <string>
 #include <memory>
 #include <vector>
+#include <set>
 #include <mutex>
 #include "config.hpp"
 #include "bot_client.hpp"
@@ -27,10 +28,20 @@ private:
     HINSTANCE h_instance_ = nullptr;
     HWND h_wnd_ = nullptr;
 
-    // --- 顶部状态指示 ---
+    // --- 顶部品牌区 ---
+    HWND label_brand_ = nullptr;      // 标题（自绘卡片内绘制，这里仅保留占位）
     HWND label_status_badge_ = nullptr;
     HWND label_active_model_ = nullptr;
     HWND label_reply_count_ = nullptr;
+
+    // --- 左侧标签页 ---
+    HWND tab_btn_ai_ = nullptr;
+    HWND tab_btn_ob_ = nullptr;
+    HWND tab_btn_plg_ = nullptr;
+    int active_tab_ = 0;              // 0=AI 1=接入 2=插件
+    std::vector<HWND> tab0_ctl_;      // 每个标签页的控件集合，切页时 Show/Hide
+    std::vector<HWND> tab1_ctl_;
+    std::vector<HWND> tab2_ctl_;
 
     // --- AI 配置控件 ---
     HWND edit_api_key_ = nullptr;
@@ -48,12 +59,12 @@ private:
     HWND chk_group_require_at_ = nullptr;
     HWND edit_at_exempt_ = nullptr;
 
-    // --- 插件管理区控件 ---
+    // --- 插件页控件 ---
     HWND label_plugin_summary_ = nullptr;
     HWND btn_reload_plugins_ = nullptr;
     HWND btn_open_plugin_dir_ = nullptr;
 
-    // --- 二级弹窗入口（点开才显示，主界面保持清爽）---
+    // --- 弹窗入口 ---
     HWND btn_advanced_ = nullptr;
     HWND btn_plugins_ = nullptr;
     HWND btn_help_ = nullptr;
@@ -66,6 +77,7 @@ private:
 
     // --- 实时日志流 ---
     HWND edit_log_ = nullptr;
+    bool log_is_riched_ = false;
 
     // 运行状态与配置
     AppConfig config_;
@@ -75,9 +87,12 @@ private:
     std::mutex log_mutex_;
     std::vector<std::string> pending_logs_;
 
-    // GDI 字体与画刷 (大字体舒适系统)
-    HFONT font_title_ = nullptr;
-    HFONT font_section_ = nullptr;
+    // 悬停态（owner-draw 按钮用）
+    std::set<int> hovered_;
+
+    // GDI 资源
+    HFONT font_brand_ = nullptr;
+    HFONT font_h2_ = nullptr;
     HFONT font_body_ = nullptr;
     HFONT font_body_bold_ = nullptr;
     HFONT font_code_ = nullptr;
@@ -87,10 +102,12 @@ private:
     HBRUSH brush_win_bg_ = nullptr;
     HBRUSH brush_card_bg_ = nullptr;
     HBRUSH brush_input_bg_ = nullptr;
+    HBRUSH brush_field_bg_ = nullptr;
     HBRUSH brush_log_bg_ = nullptr;
 
     void init_gdi_resources();
     void init_controls(HWND hwnd);
+    void switch_tab(int index);
     void load_config_to_ui();
     void save_ui_to_config();
     void toggle_bot_state();
@@ -98,6 +115,7 @@ private:
     void update_status_ui();
     void refresh_plugin_ui();
     void relayout_controls(int width, int height);
+    void append_log_text(const std::wstring& text, const std::string& raw_for_scan);
 
     static LRESULT CALLBACK window_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam);
     static LRESULT CALLBACK button_subclass_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPARAM lParam, UINT_PTR uIdSubclass, DWORD_PTR dwRefData);

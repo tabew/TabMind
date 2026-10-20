@@ -13,12 +13,12 @@
 // ---------------------------------------------------------------------------
 namespace {
 
-const COLORREF kWinBg    = RGB(245, 247, 250);
+const COLORREF kWinBg    = RGB(255, 255, 255);
 const COLORREF kCardBg   = RGB(255, 255, 255);
 const COLORREF kBorder   = RGB(226, 232, 240);
-const COLORREF kTextMain = RGB(30, 41, 59);
+const COLORREF kTextMain = RGB(15, 23, 42);
 const COLORREF kTextMuted= RGB(100, 116, 139);
-const COLORREF kPrimary  = RGB(37, 99, 235);
+const COLORREF kPrimary  = RGB(79, 70, 229);
 const COLORREF kSuccess  = RGB(16, 185, 129);
 const COLORREF kDanger   = RGB(239, 68, 68);
 
@@ -144,7 +144,8 @@ HWND mk_check(HWND parent, int id, const wchar_t* text, bool checked, int x, int
 }
 
 HFONT mk_font(int size, int weight, const wchar_t* face, bool fixed_pitch = false) {
-    return CreateFontW(size, 0, 0, 0, weight, FALSE, FALSE, FALSE,
+    // 负高度 = 字符高度（px）；正高度是单元格高度，会让字显得偏小
+    return CreateFontW(-size, 0, 0, 0, weight, FALSE, FALSE, FALSE,
                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                        CLEARTYPE_QUALITY,
                        fixed_pitch ? (FIXED_PITCH | FF_MODERN) : (DEFAULT_PITCH | FF_SWISS),
@@ -211,10 +212,10 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         ctx = (AdvCtx*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
 
-        ctx->f_body    = mk_font(15, FW_NORMAL, L"Microsoft YaHei UI");
-        ctx->f_small   = mk_font(13, FW_NORMAL, L"Microsoft YaHei UI");
-        ctx->f_section = mk_font(16, FW_BOLD,   L"Microsoft YaHei UI");
-        ctx->f_bold    = mk_font(15, FW_BOLD,   L"Microsoft YaHei UI");
+        ctx->f_body    = mk_font(13, FW_NORMAL, L"Microsoft YaHei UI");
+        ctx->f_small   = mk_font(12, FW_NORMAL, L"Microsoft YaHei UI");
+        ctx->f_section = mk_font(14, FW_BOLD,   L"Microsoft YaHei UI");
+        ctx->f_bold    = mk_font(14, FW_BOLD,   L"Microsoft YaHei UI");
 
         const AIConfig& ai = ctx->cfg->ai;
         const OneBotConfig& ob = ctx->cfg->onebot;
@@ -223,25 +224,25 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         mk_label(hwnd, L"🕹  采样与长度", 24, 14, 300, 22, ctx->f_section);
 
-        mk_label(hwnd, L"温度 Temperature (0~2)", 24, row1, 200, 20, ctx->f_small);
+        mk_label(hwnd, L"温度 (0~2)", 24, row1, 110, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_TEMP, u8w(std::to_string(ai.temperature).substr(0, 4)),
                 ed_x, row1 - 4, ed_w, 26, 0, ctx->f_body);
 
-        mk_label(hwnd, L"Max Tokens", 268, row1, 120, 20, ctx->f_small);
+        mk_label(hwnd, L"Max Tokens", 268, row1, 100, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_TOKENS, std::to_wstring(ai.max_tokens), 372, row1 - 4, ed_w, 26, ES_NUMBER, ctx->f_body);
 
-        mk_label(hwnd, L"上下文轮数", 24, row2, 160, 20, ctx->f_small);
+        mk_label(hwnd, L"上下文轮数", 24, row2, 120, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_ROUNDS, std::to_wstring(ai.max_history_rounds), ed_x, row2 - 4, ed_w, 26, ES_NUMBER, ctx->f_body);
 
-        mk_label(hwnd, L"主动接话冷却 (秒)", 268, row2, 160, 20, ctx->f_small);
+        mk_label(hwnd, L"接话冷却 (秒)", 268, row2, 100, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_COOLDOWN, std::to_wstring(ai.reply_cooldown_sec), 372, row2 - 4, ed_w, 26, ES_NUMBER, ctx->f_body);
 
         mk_label(hwnd, L"🧠  长期记忆", 24, 122, 300, 22, ctx->f_section);
 
-        mk_label(hwnd, L"记忆上限 (字)", 24, 156, 160, 20, ctx->f_small);
+        mk_label(hwnd, L"记忆上限 (字)", 24, 156, 120, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_MEM_CHARS, std::to_wstring(ai.memory_max_chars), ed_x, 152, ed_w, 26, ES_NUMBER, ctx->f_body);
 
-        mk_label(hwnd, L"触发简写阈值 (条)", 268, 156, 160, 20, ctx->f_small);
+        mk_label(hwnd, L"简写阈值 (条)", 268, 156, 100, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_MEM_BATCH, std::to_wstring(ai.memory_batch_size), 372, 152, ed_w, 26, ES_NUMBER, ctx->f_body);
 
         mk_label(hwnd, L"👁  视觉与鉴权", 24, 194, 300, 22, ctx->f_section);
@@ -251,7 +252,7 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         mk_label(hwnd, L"鉴权头方式", 24, 288, 120, 20, ctx->f_small);
         HWND combo = CreateWindowW(L"COMBOBOX", L"", WS_VISIBLE | WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
-                                   128, 284, 180, 160, hwnd, (HMENU)(INT_PTR)IDC_ADV_AUTH, nullptr, nullptr);
+                                   128, 284, 260, 180, hwnd, (HMENU)(INT_PTR)IDC_ADV_AUTH, nullptr, nullptr);
         SendMessageW(combo, WM_SETFONT, (WPARAM)ctx->f_body, TRUE);
         SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)L"both（两种都发，兼容性最好）");
         SendMessageW(combo, CB_ADDSTRING, 0, (LPARAM)L"bearer（Authorization: Bearer）");
@@ -294,7 +295,7 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lp;
         if (!ctx) break;
         if (dis->CtlID == IDC_ADV_SAVE) {
-            COLORREF bg = (dis->itemState & ODS_SELECTED) ? RGB(29, 78, 216) : kPrimary;
+            COLORREF bg = (dis->itemState & ODS_SELECTED) ? RGB(67, 56, 202) : kPrimary;
             draw_button(dis, bg, RGB(255, 255, 255), CLR_INVALID, ctx->f_bold, 8);
             return TRUE;
         }
@@ -307,9 +308,11 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     }
 
     case WM_CTLCOLORSTATIC: {
-        SetBkMode((HDC)wp, TRANSPARENT);
-        SetTextColor((HDC)wp, kTextMain);
-        return (LRESULT)GetStockObject(NULL_BRUSH);
+        HDC hdc = (HDC)wp;
+        SetBkColor(hdc, kCardBg);
+        SetBkMode(hdc, OPAQUE);
+        SetTextColor(hdc, kTextMain);
+        return (LRESULT)GetStockObject(WHITE_BRUSH);
     }
 
     case WM_COMMAND: {
@@ -413,7 +416,7 @@ LRESULT CALLBACK plg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
         ctx = (PlgCtx*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
-        ctx->f_body = mk_font(14, FW_NORMAL, L"Microsoft YaHei UI");
+        ctx->f_body = mk_font(13, FW_NORMAL, L"Microsoft YaHei UI");
         ctx->f_bold = mk_font(15, FW_BOLD, L"Microsoft YaHei UI");
 
         HWND lv = CreateWindowExW(WS_EX_CLIENTEDGE, WC_LISTVIEWW, L"",
@@ -422,12 +425,22 @@ LRESULT CALLBACK plg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         SendMessageW(lv, WM_SETFONT, (WPARAM)ctx->f_body, TRUE);
         ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES);
 
-        LVCOLUMNW col = {};
-        col.mask = LVCF_TEXT | LVCF_WIDTH;
-        col.pszText = (LPWSTR)L"状态";   col.cx = 70;  SendMessageW(lv, LVM_INSERTCOLUMNW, 0, (LPARAM)&col);
-        col.pszText = (LPWSTR)L"名称";   col.cx = 160; SendMessageW(lv, LVM_INSERTCOLUMNW, 1, (LPARAM)&col);
-        col.pszText = (LPWSTR)L"版本";   col.cx = 70;  SendMessageW(lv, LVM_INSERTCOLUMNW, 2, (LPARAM)&col);
-        col.pszText = (LPWSTR)L"说明";   col.cx = 250; SendMessageW(lv, LVM_INSERTCOLUMNW, 3, (LPARAM)&col);
+        struct ColDef { const wchar_t* text; int width; };
+        const ColDef cols[] = { { L"状态", 76 }, { L"名称", 170 }, { L"版本", 76 }, { L"说明", 226 } };
+        for (int i = 0; i < 4; ++i) {
+            LVCOLUMNW col = {};
+            col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_FMT | LVCF_SUBITEM;
+            col.fmt = LVCFMT_LEFT;
+            col.pszText = (LPWSTR)cols[i].text;
+            col.cx = cols[i].width;
+            col.iSubItem = i;
+            SendMessageW(lv, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col);
+        }
+
+        // 底部说明
+        HWND hint = CreateWindowW(L"STATIC", L"选中一行后点「启用 / 停用」可单独开关该插件",
+                                  WS_VISIBLE | WS_CHILD, 16, 484, 420, 18, hwnd, NULL, nullptr, nullptr);
+        SendMessageW(hint, WM_SETFONT, (WPARAM)ctx->f_body, TRUE);
 
         const wchar_t* labels[] = {L"🔄 重载插件", L"📂 插件目录", L"启用 / 停用", L"关闭"};
         const int ids[] = {IDC_PLG_RELOAD, IDC_PLG_OPENDIR, IDC_PLG_TOGGLE, IDC_PLG_CLOSE};
@@ -449,7 +462,7 @@ LRESULT CALLBACK plg_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         bool primary = (dis->CtlID == IDC_PLG_CLOSE);
         COLORREF bg = primary ? kPrimary : kCardBg;
         COLORREF fg = primary ? RGB(255, 255, 255) : kTextMain;
-        if (dis->itemState & ODS_SELECTED) bg = primary ? RGB(29, 78, 216) : RGB(226, 232, 240);
+        if (dis->itemState & ODS_SELECTED) bg = primary ? RGB(67, 56, 202) : RGB(226, 232, 240);
         draw_button(dis, bg, fg, primary ? CLR_INVALID : kBorder, ctx->f_bold, 8);
         return TRUE;
     }
@@ -552,7 +565,7 @@ LRESULT CALLBACK help_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CREATESTRUCTW* cs = (CREATESTRUCTW*)lp;
         ctx = (HelpCtx*)cs->lpCreateParams;
         SetWindowLongPtrW(hwnd, GWLP_USERDATA, (LONG_PTR)ctx);
-        ctx->f_body = mk_font(14, FW_NORMAL, L"Microsoft YaHei UI");
+        ctx->f_body = mk_font(13, FW_NORMAL, L"Microsoft YaHei UI");
         ctx->f_bold = mk_font(15, FW_BOLD, L"Microsoft YaHei UI");
 
         HWND edit = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", kHelpText,
@@ -570,7 +583,7 @@ LRESULT CALLBACK help_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DRAWITEM: {
         DRAWITEMSTRUCT* dis = (DRAWITEMSTRUCT*)lp;
         if (!ctx || dis->CtlID != IDC_HELP_CLOSE) break;
-        COLORREF bg = (dis->itemState & ODS_SELECTED) ? RGB(29, 78, 216) : kPrimary;
+        COLORREF bg = (dis->itemState & ODS_SELECTED) ? RGB(67, 56, 202) : kPrimary;
         draw_button(dis, bg, RGB(255, 255, 255), CLR_INVALID, ctx->f_bold, 8);
         return TRUE;
     }
@@ -637,7 +650,7 @@ bool show_advanced_settings(HWND parent, AppConfig& cfg, HINSTANCE inst) {
 void show_plugin_manager(HWND parent, HINSTANCE inst) {
     PlgCtx ctx;
     HWND dlg = create_modal(parent, inst, kPluginClass, L"插件管理",
-                            plg_proc, &ctx, 600, 500);
+                            plg_proc, &ctx, 600, 560);
     if (!dlg) return;
     run_modal(parent, dlg);
 }
