@@ -106,6 +106,7 @@
     <ClInclude Include="include\simple_http.hpp" />
     <ClInclude Include="include\simple_json.hpp" />
     <ClInclude Include="include\simple_ws.hpp" />
+    <ClInclude Include="include\ui_core.hpp" />
     <ClInclude Include="include\ui_dialogs.hpp" />
     <ClInclude Include="include\ui_theme.hpp" />
     <ClInclude Include="include\ui_window.hpp" />
@@ -116,6 +117,7 @@
     <ClCompile Include="src\core\main.cpp" />
     <ClCompile Include="src\message\message_handler.cpp" />
     <ClCompile Include="src\plugin\plugin_manager.cpp" />
+    <ClCompile Include="src\ui\ui_core.cpp" />
     <ClCompile Include="src\ui\ui_dialogs.cpp" />
     <ClCompile Include="src\ui\ui_window.cpp" />
   </ItemGroup>

@@ -18,9 +18,9 @@ if not exist bin\Release mkdir bin\Release
  /I include /Foobj\ /Fe:bin\Release\TabMind.exe ^
  src\ai\ai_client.cpp src\core\bot_client.cpp src\core\main.cpp ^
  src\message\message_handler.cpp src\plugin\plugin_manager.cpp ^
- src\ui\ui_dialogs.cpp src\ui\ui_window.cpp ^
+ src\ui\ui_dialogs.cpp src\ui\ui_core.cpp src\ui\ui_window.cpp ^
  /link /SUBSYSTEM:WINDOWS ^
- user32.lib gdi32.lib shell32.lib ole32.lib comdlg32.lib advapi32.lib ^
+ user32.lib gdi32.lib shell32.lib ole32.lib comdlg32.lib advapi32.lib imm32.lib ^
  winhttp.lib ws2_32.lib crypt32.lib comctl32.lib uxtheme.lib dwmapi.lib msimg32.lib
 
 if %errorlevel%==0 (echo BUILD OK: bin\Release\TabMind.exe) else (echo BUILD FAILED)
