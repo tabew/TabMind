@@ -794,9 +794,14 @@ void MainWindow::Impl::paint_panel(HDC dc, Panel& p) {
     // 整个面板裁剪到「自身矩形 + 少量外扩」：
     // 自绘没有子窗口的天然裁剪，不设裁剪则控件文字会溢出到相邻面板；
     // 但完全贴边裁又会把卡片阴影切掉，所以向下/右各放 4px 给阴影。
+    //
+    // 必须用 IntersectClipRect 而不是 CreateRectRgn + SelectClipRgn：
+    // 前者接受逻辑坐标并与当前裁剪区求交；后者把 region 当设备坐标、
+    // 且会整个替换裁剪区。双缓冲里我们用 SetWindowOrgEx 平移了逻辑原点，
+    // 用 SelectClipRgn 会让裁剪区整体错位 —— 拖动时表现为卡片内容被裁掉、
+    // 只剩一块背景色，并在移动路径上留下背景色残影。
     int saved = SaveDC(dc);
-    HRGN clip = CreateRectRgn(p.rc.left, p.rc.top, p.rc.right + 4, p.rc.bottom + 4);
-    SelectClipRgn(dc, clip);
+    IntersectClipRect(dc, p.rc.left, p.rc.top, p.rc.right + 4, p.rc.bottom + 4);
 
     draw::card(dc, p.rc, U::Radius);
 
@@ -843,7 +848,6 @@ void MainWindow::Impl::paint_panel(HDC dc, Panel& p) {
     }
 
     RestoreDC(dc, saved);
-    DeleteObject(clip);
 }
 
 void MainWindow::Impl::paint(HDC dc, const RECT& dirty) {

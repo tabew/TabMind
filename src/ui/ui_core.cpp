@@ -203,8 +203,10 @@ void Field::paint(HDC dc, App& app) {
         }
         if (scroll < 0) scroll = 0;
 
-        HRGN rgn = CreateRectRgn(inner.left, inner.top, inner.right, inner.bottom);
-        SelectClipRgn(dc, rgn);
+        // 用 IntersectClipRect（逻辑坐标 + 求交）而不是 SelectClipRgn：
+        // 双缓冲平移了逻辑原点，region 是设备坐标，选进去会让裁剪整体错位
+        int sv = SaveDC(dc);
+        IntersectClipRect(dc, inner.left, inner.top, inner.right, inner.bottom);
 
         if (focused && anchor >= 0 && anchor != caret) {
             int a = (std::min)(anchor, caret), b = (std::max)(anchor, caret);
@@ -231,8 +233,7 @@ void Field::paint(HDC dc, App& app) {
             SelectObject(dc, op);
             DeleteObject(pen);
         }
-        SelectClipRgn(dc, NULL);
-        DeleteObject(rgn);
+        RestoreDC(dc, sv);
     } else {
         auto lines = split_lines(vis);
         const int lineH = 19;
@@ -241,8 +242,8 @@ void Field::paint(HDC dc, App& app) {
         if (first >= (int)lines.size()) first = (int)lines.size() - 1;
         if (first < 0) first = 0;
 
-        HRGN rgn = CreateRectRgn(inner.left, inner.top, inner.right, inner.bottom);
-        SelectClipRgn(dc, rgn);
+        int sv2 = SaveDC(dc);
+        IntersectClipRect(dc, inner.left, inner.top, inner.right, inner.bottom);
 
         int y = inner.top;
         for (int i = first; i < (int)lines.size(); ++i) {
@@ -270,8 +271,7 @@ void Field::paint(HDC dc, App& app) {
                 DeleteObject(pen);
             }
         }
-        SelectClipRgn(dc, NULL);
-        DeleteObject(rgn);
+        RestoreDC(dc, sv2);
     }
     SelectObject(dc, oldFont);
 }
@@ -512,8 +512,8 @@ void LogView::paint(HDC dc, App& app) {
     draw::round_rect(dc, rc, 7, g.br_log, g.pen_border);
 
     RECT inner = { rc.left + 8, rc.top + 6, rc.right - 10, rc.bottom - 6 };
-    HRGN rgn = CreateRectRgn(inner.left, inner.top, inner.right, inner.bottom);
-    SelectClipRgn(dc, rgn);
+    int sv = SaveDC(dc);
+    IntersectClipRect(dc, inner.left, inner.top, inner.right, inner.bottom);
 
     int perPage = rows_per_page();
     int y = inner.top;
@@ -543,8 +543,7 @@ void LogView::paint(HDC dc, App& app) {
         draw::round_rect(dc, tr, 2, g.br_text_faint, g.pen_null);
     }
 
-    SelectClipRgn(dc, NULL);
-    DeleteObject(rgn);
+    RestoreDC(dc, sv);
 }
 
 void LogView::on_wheel(int delta) {
