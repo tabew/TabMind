@@ -961,7 +961,26 @@ void MainWindow::Impl::on_move(POINT p) {
         RECT old = pn.rc;
         pn.rc = nr;
         clamp_panel(pn);
-        if (drag_mode == 2) layout_panel(pn);
+        if (drag_mode == 2) {
+            // 缩放：按新尺寸重新排布控件
+            layout_panel(pn);
+        } else {
+            // 移动：把所有控件的矩形平移同样的位移。
+            // 控件的 rc 是绝对客户区坐标，面板移动时必须一起挪，否则控件会
+            // 留在原地 —— 而面板有边界裁剪，留在原地的控件直接被裁掉，
+            // 看起来就是"拖卡片时里面的文字和输入框不动/消失"。
+            // 用平移而不是 layout_panel：更快，而且不会触发布局里的 clamp 副作用。
+            int ddx = pn.rc.left - old.left;
+            int ddy = pn.rc.top - old.top;
+            if (ddx || ddy) {
+                for (auto& w : pn.ws) {
+                    w->rc.left += ddx; w->rc.right += ddx;
+                    w->rc.top += ddy;  w->rc.bottom += ddy;
+                    w->hover = false;      // 拖动时鼠标在标题栏，控件不该保持高亮
+                }
+            }
+            if (open_combo) { open_combo->open = false; open_combo = nullptr; }
+        }
         // 只重绘"旧 ∪ 新"
         RECT uni = old;
         union_rect_(&uni, pn.rc);
