@@ -196,6 +196,7 @@ static void ensure_cursors() {
     if (!s_cur_hand)     s_cur_hand    = LoadCursor(NULL, IDC_HAND);
 }
 
+
 // ---------------------------------------------------------------------------
 // 双缓冲池
 // v2 每次重绘都 CreateCompatibleBitmap + DeleteObject，卡片大一点就是每帧
@@ -820,8 +821,10 @@ void MainWindow::clamp_module(int kind) {
     r.right = r.left + w;
     r.bottom = r.top + h;
     if (mod_wnd_[kind]) {
+        // 不加 SWP_NOCOPYBITS：让系统直接搬移像素，避免整卡重绘。
+        // 卡片内容此时没有子控件，搬移像素与重绘结果一致。
         SetWindowPos(mod_wnd_[kind], NULL, r.left, r.top, w, h,
-                     SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+                     SWP_NOZORDER | SWP_NOACTIVATE);
     }
 }
 
@@ -1279,6 +1282,12 @@ void MainWindow::abort_drag() {
     int id = drag_mod_;
     drag_mode_ = 0;
     drag_mod_ = -1;
+    // 致命坑：Windows 发 WM_CANCELMODE 时【不会】自动释放鼠标捕获，必须自己释放。
+    // 漏掉这一步，卡片会一直吸住全系统的鼠标输入，用户点哪儿都没反应，
+    // 整个界面就像死机 —— 这就是"拖动卡片时软件直接卡死"的根源。
+    // 这里不判断 GetCapture() 是否为当前卡片：WM_CANCELMODE 到达时系统是否
+    // 已经释放捕获是不确定的，无条件释放最稳妥（若无捕获则是 no-op）。
+    ReleaseCapture();
     if (destroying_ || id < 0 || id >= MOD_COUNT || !mod_wnd_[id]) return;
     set_card_controls_visible(id, true);
     relayout_module(id);
@@ -1352,6 +1361,11 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
 
     case WM_MOUSEMOVE: {
         if (!self) break;
+        // 主窗口上的任何鼠标移动都顺手做一次拖动状态自愈：
+        // 一旦物理左键已弹起，说明拖动注定不会再收到 LBUTTONUP，必须立刻收尾。
+        if (self->drag_mode_ != 0 && (GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+            self->abort_drag();
+        }
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         int row = self->sidebar_row_at(pt);
         if (row != self->hover_row_) {
@@ -1506,6 +1520,14 @@ LRESULT CALLBACK MainWindow::main_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LPAR
         return 0;
     }
 
+    case WM_CANCELMODE:
+        // 关键：系统可能在主窗口上（而不只在捕获的卡片上）通知取消鼠标捕获。
+        // 若主窗口不处理，卡片里残留的拖动状态会让控件永远处于隐藏状态，
+        // 且鼠标捕获不释放 —— 表现就是"拖动卡片后软件卡死"。
+        if (self) self->abort_drag();
+        return 0;
+
+
     case WM_DESTROY:
         if (self) { self->destroying_ = true; self->abort_drag(); }
         KillTimer(hwnd, kStatusTimer);
@@ -1597,8 +1619,13 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
     case WM_SETCURSOR: {
         if (LOWORD(lParam) != HTCLIENT || !s_cur_arrow) break;
         if (self && self->drag_mode_ != 0) {
-            SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
-            return TRUE;
+            // 同样的自愈校验：按键已弹起就别再显示拖动光标
+            if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+                self->abort_drag();
+            } else {
+                SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
+                return TRUE;
+            }
         }
         POINT pt;
         GetCursorPos(&pt);
@@ -1613,6 +1640,10 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_LBUTTONDOWN: {
         if (!self || !ctx) break;
+        // 第一道防线：只有物理左键真的按住才允许进入拖动。
+        // 否则（合成消息、按键已弹起的迟到消息）会让拖动状态凭空建立，
+        // 之后没人负责收尾，drag_mode_ 就永久残留了。
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) return 0;
         POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
         RECT cr;
         GetClientRect(hwnd, &cr);
@@ -1635,6 +1666,11 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
         self->drag_mod_ = ctx->kind;
         self->drag_pt_ = pt;
         self->drag_rc0_ = self->mod_rect_[ctx->kind];
+        // 关键：位移必须按屏幕坐标算。WM_MOUSEMOVE 的 lParam 是"相对捕获窗口"
+        // 的坐标，而卡片本身在跟着鼠标跑，若用客户区坐标算 delta，卡片每移动一点
+        // 就把鼠标的相对偏移抵消掉一部分，结果就是拖动明显比鼠标慢、拖不动。
+        self->drag_screen_pt_ = pt;
+        ClientToScreen(hwnd, &self->drag_screen_pt_);
         self->bring_to_front(ctx->kind);
         SetCapture(hwnd);
         SetCursor(self->drag_mode_ == 2 ? s_cur_sizenwse : s_cur_sizeall);
@@ -1645,8 +1681,21 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
 
     case WM_MOUSEMOVE: {
         if (!self || !ctx || self->drag_mode_ == 0 || self->drag_mod_ != ctx->kind) break;
-        POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
-        POINT delta = { pt.x - self->drag_pt_.x, pt.y - self->drag_pt_.y };
+
+        // 自愈式校验：拖动状态只应该在"鼠标左键真的按住"时存在。
+        // 只要物理按键已经弹起，就说明我们在某个路径上漏掉了收尾（捕获被别的
+        // 进程抢走、LBUTTONUP 丢失、Alt+Tab 等）。此时必须立刻结束拖动，否则
+        // drag_mode_ 会永久残留：以后鼠标一碰到卡片就会误入拖动分支，卡片跟着
+        // 光标乱跑、卡内控件还停在隐藏状态 —— 表现就是"鼠标指向卡片就卡死"。
+        if ((GetKeyState(VK_LBUTTON) & 0x8000) == 0) {
+            self->abort_drag();
+            break;
+        }
+
+        // 转成屏幕坐标再算位移：卡片在动，用客户区坐标算出的 delta 会被抵消
+        POINT sp = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
+        ClientToScreen(hwnd, &sp);
+        POINT delta = { sp.x - self->drag_screen_pt_.x, sp.y - self->drag_screen_pt_.y };
 
         RECT rc = self->drag_rc0_;
         if (self->drag_mode_ == 1) {
@@ -1673,21 +1722,22 @@ LRESULT CALLBACK MainWindow::module_proc(HWND hwnd, UINT uMsg, WPARAM wParam, LP
             rc.right == old.right && rc.bottom == old.bottom) return 0;
         self->mod_rect_[ctx->kind] = rc;
 
-        // SWP_NOCOPYBITS：强制只重画暴露区域，避免整块拷贝放大开销
+        // 关键：不要加 SWP_NOCOPYBITS。卡片内容此时没有子控件（拖动开始时就隐藏了），
+        // 让系统直接拷贝旧像素是最便宜的窗口移动；SWP_NOCOPYBITS 会强制整卡重绘，
+        // 高速拖动时这是压垮 UI 线程的主因。
+        // 也不要在这里手动 InvalidateRect 父窗口：移动子窗口时系统本就会让父窗口
+        // 暴露出来的区域失效，再手动 invalidate 等于让父窗口白白多重绘一次。
         if (self->drag_mode_ == 1) {
             SetWindowPos(hwnd, NULL, rc.left, rc.top, 0, 0,
-                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+                         SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
         } else {
             SetWindowPos(hwnd, NULL, rc.left, rc.top, w, h,
-                         SWP_NOZORDER | SWP_NOACTIVATE | SWP_NOCOPYBITS);
+                         SWP_NOZORDER | SWP_NOACTIVATE);
         }
-        // 补画卡片让出来的那块背景
-        InvalidateRect(GetParent(hwnd), &old, FALSE);
         return 0;
     }
 
     case WM_CANCELMODE:
-        // Alt / Esc / 弹窗 等导致捕获被系统收回：必须还原控件，否则卡片永久空白
         if (self && self->drag_mod_ >= 0) self->abort_drag();
         break;
 

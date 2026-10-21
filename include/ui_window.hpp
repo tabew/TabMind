@@ -86,8 +86,9 @@ private:
     // 拖动/缩放状态
     int drag_mode_ = 0;                // 0 无 / 1 移动 / 2 缩放
     int drag_mod_ = -1;
-    POINT drag_pt_ = {};
-    RECT drag_rc0_ = {};
+    POINT drag_pt_ = {};               // 按下时的卡片客户区坐标（仅用于命中测试）
+    POINT drag_screen_pt_ = {};        // 按下时的屏幕坐标 —— 拖动位移必须用它算
+    RECT drag_rc0_ = {};               // 按下时的卡片矩形（主窗口客户区坐标）
 
     // AI
     HWND edit_api_key_ = nullptr;
