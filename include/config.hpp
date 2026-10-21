@@ -55,7 +55,16 @@ struct UIConfig {
     int theme = 0;                       // 主题索引（见 ui_theme.hpp）
     bool locked = false;                 // 锁定布局：禁止拖动/缩放
     std::vector<UILayoutItem> modules;   // 为空表示使用默认布局
+    // 布局版本号。UI 大改（面板数量/默认排布变化）时递增，
+    // 这样老配置文件里残留的旧布局会被自动丢弃、改用新默认排布，
+    // 不会让用户升级后面对一堆错位/隐藏的面板。
+    //   0（或缺失）= v3 及更早的子窗口卡片布局
+    //   4          = v4 单窗口全自绘三分栏
+    int layout_ver = 0;
 };
+
+// 当前 UI 布局版本（改 UI 排布时同步递增）
+inline constexpr int kUiLayoutVersion = 4;
 
 struct AppConfig {
     OneBotConfig onebot;
@@ -108,6 +117,7 @@ struct AppConfig {
                 auto uj = j["ui"];
                 if (uj.contains("theme")) config.ui.theme = uj["theme"].get<int>();
                 if (uj.contains("locked")) config.ui.locked = uj["locked"].get<bool>();
+                if (uj.contains("layout_ver")) config.ui.layout_ver = uj["layout_ver"].get<int>();
                 if (uj.contains("modules") && uj["modules"].is_array()) {
                     config.ui.modules.clear();
                     for (size_t i = 0; i < uj["modules"].size(); ++i) {
@@ -180,6 +190,7 @@ struct AppConfig {
         nlohmann::json ui_obj = nlohmann::json::object();
         ui_obj["theme"] = ui.theme;
         ui_obj["locked"] = ui.locked;
+        ui_obj["layout_ver"] = kUiLayoutVersion;
         {
             nlohmann::json mods = nlohmann::json::array();
             for (const auto& m : ui.modules) {

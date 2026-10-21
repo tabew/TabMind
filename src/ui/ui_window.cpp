@@ -1248,10 +1248,20 @@ void MainWindow::Impl::save_layout() {
         cfg.ui.modules.push_back(it);
     }
     cfg.ui.theme = theme_index();
+    cfg.ui.layout_ver = kUiLayoutVersion;
     cfg.save_to_file("config.json");
 }
 
 void MainWindow::Impl::load_layout() {
+    // 旧版（v3 及更早）是"子窗口卡片"架构，它保存的面板尺寸/位置对 v4 完全
+    // 不适用（面板会又小又重叠、甚至好几个是隐藏的）。靠 layout_ver 识别并
+    // 直接丢弃旧布局，改用新的默认三分栏 —— ai / onebot 里的业务配置不受影响。
+    if (cfg.ui.layout_ver < kUiLayoutVersion) {
+        apply_default_layout();
+        layout_custom = false;
+        save_layout();          // 立刻写回新版本号，避免每次都重置
+        return;
+    }
     bool ok = (cfg.ui.modules.size() == (size_t)P_COUNT);
     if (!ok) { apply_default_layout(); layout_custom = false; return; }
     layout_custom = true;
