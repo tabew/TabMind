@@ -317,6 +317,37 @@ void MainWindow::Impl::build_panels() {
             f_system = f.get();
             p.ws.push_back(std::move(f));
         }
+
+        // 服务商预设：base_url / 鉴权方式 / 模型名是一套的，配错了就是 401。
+        // 给两个一键按钮，省得手动对着文档填。
+        {
+            auto mk = [&](const wchar_t* label, const char* url, const char* model) {
+                auto b = std::make_unique<Button>();
+                b->text = label;
+                b->font = app.f_small;
+                b->click = [this, url, model]() {
+                    if (f_base_url) f_base_url->text = u2w(url);
+                    if (c_model) {
+                        c_model->text = u2w(model);
+                        c_model->sync_index();
+                        c_model->caret = (int)c_model->text.size();
+                    }
+                    cfg.ai.base_url = url;
+                    cfg.ai.model = model;
+                    cfg.ai.auth_style = "auto";     // 按 base_url 自动判断鉴权头
+                    layout_all();
+                    invalidate_all_();
+                    // 预设必须自带落盘：用户点完预设就应当生效，
+                    // 不能还要再点一次「保存配置」否则白点
+                    save_layout();
+                    push_log(std::string("已套用预设: ") + url + "  模型 " + model +
+                             "（鉴权方式自动），配置已保存");
+                };
+                p.ws.push_back(std::move(b));
+            };
+            mk(L"DeepSeek 官方", "https://api.deepseek.com", "deepseek-flash");
+            mk(L"小米 MiMo", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro");
+        }
     }
 
     // ---------- OneBot / QQ ----------
@@ -546,10 +577,16 @@ void MainWindow::Impl::layout_panel(Panel& p) {
         (*it)->rc = place(xRound, y + U::LabelH + 2, wRound, U::InputH); ++it;
         y += U::LabelH + 2 + U::InputH + U::RowGap;
 
-        (*it)->rc = place(L, y, CW, U::LabelH); ++it;
+        (*it)->rc = place(L, y, CW, U::LabelH); ++it;              // 系统提示词 label
+        // 两个服务商预设按钮（并排，放在多行文本框上方）
+        int hPre = U::BtnH;
+        int wPre = (CW - 8) / 2;
+        (*it)->rc = place(L, y + U::LabelH + 2, wPre, hPre); ++it;
+        (*it)->rc = place(L + wPre + 8, y + U::LabelH + 2, wPre, hPre); ++it;
+        y += U::LabelH + 2 + hPre + 8;
         int hArea = p.rc.bottom - U::Pad - (y + U::LabelH + 2);
         if (hArea < 60) hArea = 60;
-        (*it)->rc = place(L, y + U::LabelH + 2, CW, hArea); ++it;
+        (*it)->rc = place(L, y + U::LabelH + 2, CW, hArea); ++it;   // 多行文本框
     } else if (p.kind == P_QQ) {
         auto it = p.ws.begin();
         auto place = [&](int x, int yy, int w, int h) -> RECT {
@@ -1242,6 +1279,8 @@ void MainWindow::Impl::sync_cfg_from_ui() {
             app.model_name = m;
         }
     }
+    // 鉴权方式始终用 auto：按 base_url 自动判断，配错就是 401
+    cfg.ai.auth_style = "auto";
     if (f_ws_url)   cfg.onebot.ws_url = w2u(f_ws_url->text);
     if (f_bot_qq) {
         try { cfg.onebot.bot_qq = std::stoll(w2u(f_bot_qq->text)); } catch (...) {}

@@ -26,7 +26,10 @@ struct AIConfig {
     // 视觉模型，留空则与 model 相同
     std::string vision_model = "";
     // bearer | api-key | both（默认 both，兼容 DeepSeek 与小米 MiMo）
-    std::string auth_style = "both";
+    // 鉴权头风格：auto（按 base_url 自动判断，推荐）/ bearer / api-key / both
+    // auto 最省心：DeepSeek 官方用 Bearer，小米 MiMo 用 api-key，
+    // 填错会直接 401，所以默认走自动判断。
+    std::string auth_style = "auto";
     // 关闭思考模式：防止 reasoning 吃光 max_tokens 导致 content 为空（识图失败常见原因）
     bool enable_thinking = false;
     std::string system_prompt = "你是一个真实自然、富有幽默感和同理心的 QQ 好友。请用口语化、接地气的短句与我交流，每次回复尽量只说 1~2 句话，不要长篇大论，避免分点罗列或书面说教。你能看到群友发的图片，请结合图片内容回应。";

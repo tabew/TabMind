@@ -386,16 +386,22 @@ void AIClient::clear_history(const std::string& context_id) {
     save_summaries_to_disk();
 }
 
+// 按 base_url 推断该用哪种鉴权头。
+// DeepSeek 官方 = Authorization: Bearer；小米 MiMo = api-key:；
+// 其它中转网关两种都收，用 both 最保险。
+static std::string infer_auth_style(const std::string& base_url, const std::string& configured) {
+    if (configured == "bearer" || configured == "api-key" || configured == "both") {
+        return configured;
+    }
+    // configured 为空或 "auto"：按 host 判断
+    if (base_url.find("xiaomimimo") != std::string::npos) return "api-key";
+    if (base_url.find("deepseek") != std::string::npos) return "bearer";
+    return "both";
+}
+
 std::string AIClient::send_http_request(const std::string& req_body) {
     // 小米 MiMo 官方只认 api-key 头；若同时塞 Authorization: Bearer 可能被网关判为无效密钥
-    std::string auth = config_.auth_style;
-    if (auth.empty() || auth == "both") {
-        if (config_.base_url.find("xiaomimimo") != std::string::npos) {
-            auth = "api-key";
-        } else {
-            auth = "bearer";
-        }
-    }
+    std::string auth = infer_auth_style(config_.base_url, config_.auth_style);
     auto resp = simplehttp::post_json(config_.base_url, config_.api_key, req_body, auth);
     if (resp.status_code == 200) {
         return resp.body;
@@ -423,12 +429,16 @@ std::vector<std::string> AIClient::fetch_models(std::string& err) {
     if (cut != std::string::npos) base = base.substr(0, cut);
     if (base.empty()) { err = "base_url 为空"; return out; }
 
-    std::string auth = config_.auth_style;
-    if (auth.empty() || auth == "both") {
-        auth = (base.find("xiaomimimo") != std::string::npos) ? "api-key" : "bearer";
-    }
+    std::string auth = infer_auth_style(base, config_.auth_style);
 
     auto resp = simplehttp::get_auth(base + "/models", config_.api_key, auth);
+    // 鉴权头被配错时（该用 Bearer 却发了 api-key，反之亦然）网关一律回 401，
+    // 换个头再试一次，省得用户去猜到底该填哪种
+    if (resp.status_code == 401 || resp.status_code == 403) {
+        std::string alt = (auth == "api-key") ? "bearer" : "api-key";
+        auto resp2 = simplehttp::get_auth(base + "/models", config_.api_key, alt);
+        if (resp2.status_code == 200) { resp = resp2; auth = alt; }
+    }
     if (resp.status_code != 200) {
         err = "HTTP " + std::to_string(resp.status_code) + " " +
               resp.body.substr(0, std::min<size_t>(resp.body.size(), 300));
