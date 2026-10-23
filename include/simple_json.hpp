@@ -8,6 +8,73 @@
 #include <cctype>
 #include <initializer_list>
 
+
+// ---------------------------------------------------------------------------
+// JSON 字符串转义（带 UTF-8 合法性校验）
+//
+// 原实现只处理了 " \ \b \f \n \r \t，其余字节原样输出，存在两个漏洞：
+//   1. 其它控制字符（0x01-0x07、0x0B、0x0E-0x1F）没转义 -> 请求体不是合法 JSON
+//   2. 非法 UTF-8 字节没校验没替换 -> 服务端直接回
+//      "invalid unicode code point"（400），而提示词本身完全看不出问题
+// 这里做严格校验：合法序列原样输出，非法字节与孤立代理项替换成 U+FFFD。
+// ---------------------------------------------------------------------------
+inline void json_escape_string(const std::string& in, std::string& out) {
+    static const char* hex = "0123456789abcdef";
+    out.reserve(in.size() + 16);
+    size_t i = 0, n = in.size();
+    auto put_replacement = [&]() {
+        out += "\xEF\xBF\xBD";   // U+FFFD
+    };
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        if (c == '"')       { out += "\\\""; ++i; continue; }
+        if (c == '\\')      { out += "\\\\"; ++i; continue; }
+        if (c == '\b')      { out += "\\b";  ++i; continue; }
+        if (c == '\f')      { out += "\\f";  ++i; continue; }
+        if (c == '\n')      { out += "\\n";  ++i; continue; }
+        if (c == '\r')      { out += "\\r";  ++i; continue; }
+        if (c == '\t')      { out += "\\t";  ++i; continue; }
+        if (c < 0x20) {
+            // 其余控制字符必须转义，否则 JSON 非法
+            out += "\\u00";
+            out += hex[(c >> 4) & 0xF];
+            out += hex[c & 0xF];
+            ++i;
+            continue;
+        }
+        if (c < 0x80) { out += static_cast<char>(c); ++i; continue; }
+
+        // 多字节序列：校验完整性
+        size_t len = 0;
+        uint32_t cp = 0;
+        if ((c & 0xE0) == 0xC0)      { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        else { put_replacement(); ++i; continue; }   // 非法起始字节
+
+        if (i + len > n) { put_replacement(); ++i; continue; }
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k) {
+            unsigned char cc = static_cast<unsigned char>(in[i + k]);
+            if ((cc & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (!ok) { put_replacement(); ++i; continue; }
+
+        bool bad = false;
+        if (len == 2 && cp < 0x80) bad = true;
+        if (len == 3 && cp < 0x800) bad = true;
+        if (len == 4 && cp < 0x10000) bad = true;
+        if (cp > 0x10FFFF) bad = true;
+        if (cp >= 0xD800 && cp <= 0xDFFF) bad = true;   // 代理项
+        if (cp == 0xFFFE || cp == 0xFFFF) bad = true;   // 非字符码点
+        if (bad) { put_replacement(); i += len; continue; }
+
+        out.append(in, i, len);
+        i += len;
+    }
+}
+
 namespace simplejson {
     enum Type { TYPE_NULL, TYPE_BOOL, TYPE_NUMBER, TYPE_STRING, TYPE_ARRAY, TYPE_OBJECT };
 
@@ -135,18 +202,9 @@ namespace simplejson {
                     return std::to_string(num_val);
                 }
                 case TYPE_STRING: {
-                    ss << "\"";
-                    for (char c : str_val) {
-                        if (c == '"') ss << "\\\"";
-                        else if (c == '\\') ss << "\\\\";
-                        else if (c == '\b') ss << "\\b";
-                        else if (c == '\f') ss << "\\f";
-                        else if (c == '\n') ss << "\\n";
-                        else if (c == '\r') ss << "\\r";
-                        else if (c == '\t') ss << "\\t";
-                        else ss << c;
-                    }
-                    ss << "\"";
+                    std::string esc;
+                    json_escape_string(str_val, esc);
+                    ss << "\"" << esc << "\"";
                     return ss.str();
                 }
                 case TYPE_ARRAY: {

@@ -1,4 +1,5 @@
 #include "ai_client.hpp"
+#include "ui_core.hpp"
 #include "simple_http.hpp"
 #include "simple_json.hpp"
 #include <iostream>
@@ -18,6 +19,57 @@ static size_t utf8_length(const std::string& s) {
         if ((c & 0xC0) != 0x80) ++n;
     }
     return n;
+}
+
+
+// ---------------------------------------------------------------------------
+// 严格 UTF-8 清洗
+//
+// 服务端报 "invalid unicode code point" 的原因：请求体里的某个字符串含有
+// 非法 UTF-8 —— 典型来源是 AI 生成的长期记忆摘要里混进了半个 emoji、
+// 或者历史消息里残留了坏字节。这类字符会让整个请求被服务端拒绝（400），
+// 而且是"莫名其妙地"失败：提示词本身完全合法。
+//
+// 这里做严格校验：保留合法序列，丢弃非法字节与孤立代理项，
+// 把非字符码点（U+FFFE/U+FFFF）替换成 U+FFFD。
+// ---------------------------------------------------------------------------
+static std::string sanitize_utf8(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    size_t i = 0, n = in.size();
+    while (i < n) {
+        unsigned char c = static_cast<unsigned char>(in[i]);
+        size_t len = 0;
+        uint32_t cp = 0;
+        if (c < 0x80) { len = 1; cp = c; }
+        else if ((c & 0xE0) == 0xC0) { len = 2; cp = c & 0x1F; }
+        else if ((c & 0xF0) == 0xE0) { len = 3; cp = c & 0x0F; }
+        else if ((c & 0xF8) == 0xF0) { len = 4; cp = c & 0x07; }
+        else { ++i; continue; }                    // 非法起始字节：丢弃
+
+        if (i + len > n) { ++i; continue; }        // 截断的序列：丢弃
+        bool ok = true;
+        for (size_t k = 1; k < len; ++k) {
+            unsigned char cc = static_cast<unsigned char>(in[i + k]);
+            if ((cc & 0xC0) != 0x80) { ok = false; break; }
+            cp = (cp << 6) | (cc & 0x3F);
+        }
+        if (!ok) { ++i; continue; }                // 续字节非法：丢弃
+
+        // 过长编码 / 代理项 / 越界码点
+        bool bad = false;
+        if (len == 2 && cp < 0x80) bad = true;
+        if (len == 3 && cp < 0x800) bad = true;
+        if (len == 4 && cp < 0x10000) bad = true;
+        if (cp > 0x10FFFF) bad = true;
+        if (cp >= 0xD800 && cp <= 0xDFFF) bad = true;   // 代理项（孤立/非配对）
+        if (cp == 0xFFFE || cp == 0xFFFF) bad = true;   // 非字符码点
+        if (bad) { i += len; continue; }
+
+        out.append(in, i, len);
+        i += len;
+    }
+    return out;
 }
 
 static std::string utf8_truncate(const std::string& s, size_t max_chars) {
@@ -530,7 +582,16 @@ std::string AIClient::call_model(const std::string& model, const nlohmann::json&
         req_json["enable_thinking"] = true;
     }
 
-    std::string body = req_json.dump();
+    // dump 内部会做 UTF-8 校验与转义（见 simple_json.hpp 的 json_escape_string），
+    // 脏字节会被替换成 U+FFFD，服务端就不会再回 invalid unicode code point。
+    std::string body;
+    try {
+        body = req_json.dump(-1, 0);
+    } catch (const std::exception& e) {
+        last_error_ = std::string("构造请求失败: ") + e.what();
+        std::cerr << "[AIClient] " << last_error_ << std::endl;
+        return "";
+    }
     std::string resp_str = send_http_request(body);
     if (resp_str.empty()) {
         if (last_error_.empty()) last_error_ = "空响应";
@@ -734,8 +795,20 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     nlohmann::json messages = nlohmann::json::array();
 
     // 1. 系统主提示词 + 动态注入长期记忆摘要
-    std::string full_sys_prompt = cfg_get()->system_prompt;
+    // 源头清洗：提示词 / 记忆摘要 / 用户消息里可能混有脏字节
+    // （典型来源：AI 生成的长期记忆摘要里有半个 emoji）
+    std::string raw_sys = cfg_get()->system_prompt;
+    std::string full_sys_prompt = sanitize_utf8(raw_sys);
+    if (full_sys_prompt.size() != raw_sys.size()) {
+        file_log("[AIClient] 提示词含非法 UTF-8 字节，已自动清洗: "
+                 + std::to_string(raw_sys.size() - full_sys_prompt.size()) + " 字节被替换");
+    }
     if (!current_summary.empty()) {
+        std::string clean_summary = sanitize_utf8(current_summary);
+        if (clean_summary.size() != current_summary.size()) {
+            file_log("[AIClient] 长期记忆摘要含非法 UTF-8 字节，已自动清洗");
+            current_summary.swap(clean_summary);
+        }
         full_sys_prompt += "\n\n【关于本会话的已知长期记忆摘要】:\n" + current_summary;
     }
     if (allow_silent) {
