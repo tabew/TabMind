@@ -102,6 +102,7 @@ struct Field : W {
     int  caret = 0;
     int  anchor = -1;
     int  scroll = 0;
+    int  reserve_right = 0;   // 右侧为其它元素预留的宽度（如 Combo 的下拉箭头）
 
     bool focusable() const override { return true; }
     void paint(HDC dc, App& app) override;
@@ -117,19 +118,27 @@ struct Field : W {
 };
 
 // ---------------------------------------------------------------------------
-// 下拉选择
+// 下拉选择（可编辑）
+//
+// 模型名迭代很快，如果只能从固定列表里选，出了新模型就得改代码重新发版。
+// 所以 Combo 直接继承 Field：框体里可以像输入框一样打字输入任意模型名，
+// 点右侧箭头才展开预设列表。既能快速选，也能填列表里没有的新模型。
+//   text   = 当前模型名（可编辑）
+//   index  = 命中的预设项下标，-1 表示自定义
 // ---------------------------------------------------------------------------
-struct Combo : W {
+struct Combo : Field {
     std::vector<std::wstring> items;
-    int index = 0;
+    int index = -1;
     bool open = false;
 
-    bool focusable() const override { return true; }
     void paint(HDC dc, App& app) override;
-    void on_down(POINT) override;
+    void on_down(POINT p) override;
 
     void paint_popup(HDC dc, App& app);
     RECT popup_rect() const;
+    bool in_arrow(POINT p) const;
+    void choose(int i);
+    void sync_index();          // text 变了以后刷新 index
 };
 
 // ---------------------------------------------------------------------------

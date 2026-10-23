@@ -24,6 +24,7 @@
 
 #define WM_APP_LOG      (WM_APP + 1)
 #define WM_APP_TESTDONE (WM_APP + 2)
+#define WM_APP_MODELS    (WM_APP + 3)
 
 #define IDT_CARET  1
 #define IDT_STATUS 2
@@ -224,6 +225,7 @@ struct MainWindow::Impl {
     void toggle_bot();
     void save_config();
     void test_api();
+    void do_fetch_models();
     void pump_logs();
     void push_log(const std::string& s);
 
@@ -281,17 +283,32 @@ void MainWindow::Impl::build_panels() {
         f_base_url = add_field(false, L"https://api.example.com/v1");
         add_label(L"API 密钥 (API Key)");
         f_api_key = add_field(true, L"sk-...");
+        // 控件注册顺序必须与 layout_panel 的遍历顺序一致：
+        // 每個 label 后面紧跟它自己的输入控件，下拉框也紧跟它的 label。
+        // （之前把三个 label 连着放再放输入框，导致布局按下标全错位。）
         add_label(L"模型");
-        add_label(L"Max Tokens");
-        add_label(L"上下文轮数");
         {
             auto c = std::make_unique<Combo>();
-            c->items = { L"deepseek-chat", L"deepseek-reasoner", L"deepseek-v4-flash",
-                         L"gpt-4o-mini", L"gpt-4o" };
+            // 模型名以服务商官方文档为准。DeepSeek 官方现役名是 deepseek-flash
+            // （V4.1-Flash-1017，2026-10-17 升级）；旧的 deepseek-v4-flash /
+            // deepseek-v4-pro 已下线或被路由过去，仍可用但不再是主名。
+            // 这个框可以直接打字填任意模型名，出了新模型不用改代码发版。
+            c->items = {
+                L"deepseek-flash",      // DeepSeek V4.1-Flash-1017（官方现役名）
+                L"deepseek-v4-pro",     // 旧 Pro 名，当前路由到 V4.1 Flash
+                L"deepseek-chat",       // 旧通用名
+                L"deepseek-reasoner",   // 旧推理名
+                L"mimo-v2.6-pro",       // 小米 MiMo
+                L"gpt-4o-mini",
+                L"gpt-4o",
+            };
+            c->placeholder = L"可直接输入模型名";
             c_model = c.get();
             p.ws.push_back(std::move(c));
         }
+        add_label(L"Max Tokens");
         f_max_tokens = add_field(false, L"1000");
+        add_label(L"上下文轮数");
         f_rounds = add_field(false, L"10");
         add_label(L"系统提示词 / 人设");
         {
@@ -378,6 +395,7 @@ void MainWindow::Impl::build_panels() {
         btn_toggle = mk_btn(L"启动机器人", true, [this]() { toggle_bot(); });
         mk_btn(L"保存配置", false, [this]() { save_config(); });
         mk_btn(L"测试接口", false, [this]() { test_api(); });
+        mk_btn(L"拉取模型", false, [this]() { do_fetch_models(); });
         mk_btn(L"高级设置", false, [this]() {
             if (ui_dialogs::show_advanced_settings(hwnd, cfg, inst)) {
                 cfg.save_to_file("config.json");
@@ -511,18 +529,20 @@ void MainWindow::Impl::layout_panel(Panel& p) {
         (*it)->rc = place(L, y + U::LabelH + 2, CW, U::InputH); ++it;
         y += U::LabelH + 2 + U::InputH + U::RowGap;
 
-        int wModel = CW * 46 / 100;
-        int wTok   = CW * 24 / 100;
-        int wRound = CW - wModel - wTok - 16;
-        if (wRound < 52) wRound = 52;
-        int xTok = L + wModel + 8;
-        int xRound = xTok + wTok + 8;
+        // 模型名单独占一整行：模型名普遍较长（deepseek-v4.1-flash 之类），
+        // 和 Max Tokens 并排会被截断，看不清到底填的是什么。
+        (*it)->rc = place(L, y, CW, U::LabelH); ++it;                    // 模型 label
+        (*it)->rc = place(L, y + U::LabelH + 2, CW, U::InputH); ++it;    // 模型下拉
+        y += U::LabelH + 2 + U::InputH + U::RowGap;
 
-        (*it)->rc = place(L, y, wModel, U::LabelH); ++it;          // 模型
-        (*it)->rc = place(xTok, y, wTok, U::LabelH); ++it;         // Max Tokens
-        (*it)->rc = place(xRound, y, wRound, U::LabelH); ++it;     // 轮数
-        (*it)->rc = place(L, y + U::LabelH + 2, wModel, U::InputH); ++it;
-        (*it)->rc = place(xTok, y + U::LabelH + 2, wTok, U::InputH); ++it;
+        int wTok   = CW * 42 / 100;
+        int wRound = CW - wTok - 8;
+        if (wRound < 52) wRound = 52;
+        int xRound = L + wTok + 8;
+
+        (*it)->rc = place(L, y, wTok, U::LabelH); ++it;                 // Max Tokens label
+        (*it)->rc = place(L, y + U::LabelH + 2, wTok, U::InputH); ++it;
+        (*it)->rc = place(xRound, y, wRound, U::LabelH); ++it;           // 轮数 label
         (*it)->rc = place(xRound, y + U::LabelH + 2, wRound, U::InputH); ++it;
         y += U::LabelH + 2 + U::InputH + U::RowGap;
 
@@ -566,42 +586,31 @@ void MainWindow::Impl::layout_panel(Panel& p) {
             (*it)->rc = RECT{ L + i * (bw + 8), by, L + i * (bw + 8) + bw, by + U::BtnH };
         }
     } else if (p.kind == P_ACTION) {
-        int by = y;
-        for (auto& w : p.ws) {
-            Button* b = dynamic_cast<Button*>(w.get());
-            if (!b) continue;
-            if (b == btn_toggle) {
-                b->rc = RECT{ L, by, R, by + 44 };
-                by += 54;
-            } else {
-                int half = (CW - 8) / 2;
-                // 成对排列
-                static const int seq[] = { 0, 1, 0, 1, 2 };
-                (void)seq;
-                b->rc = RECT{ L, by, L + half, by + U::BtnH };
-                // 由下面的配对逻辑覆盖
-            }
-        }
-        // 明确排布：保存/测试、高级/说明、重置（整行）
+        // 通用网格：第 1 个（主行动按钮）独占一行，其余每行 2 个，
+        // 落单的那个占满整行。这样以后加减按钮不用改布局代码。
         std::vector<Button*> bs;
         for (auto& w : p.ws) {
             Button* b = dynamic_cast<Button*>(w.get());
             if (b) bs.push_back(b);
         }
         int half = (CW - 8) / 2;
-        by = y + 54;
-        if (bs.size() >= 3) {
-            bs[1]->rc = RECT{ L, by, L + half, by + U::BtnH };
-            bs[2]->rc = RECT{ L + half + 8, by, R, by + U::BtnH };
+        int by = y;
+        size_t i = 0;
+        if (!bs.empty()) {
+            bs[0]->rc = RECT{ L, by, R, by + 44 };   // 启动/停止：主按钮
+            by += 54;
+            i = 1;
         }
-        by += U::BtnH + 10;
-        if (bs.size() >= 5) {
-            bs[3]->rc = RECT{ L, by, L + half, by + U::BtnH };
-            bs[4]->rc = RECT{ L + half + 8, by, R, by + U::BtnH };
-        }
-        by += U::BtnH + 10;
-        if (bs.size() >= 6) {
-            bs[5]->rc = RECT{ L, by, R, by + U::BtnH };
+        for (; i < bs.size(); ) {
+            if (i + 1 < bs.size()) {
+                bs[i]->rc     = RECT{ L, by, L + half, by + U::BtnH };
+                bs[i + 1]->rc = RECT{ L + half + 8, by, R, by + U::BtnH };
+                i += 2;
+            } else {
+                bs[i]->rc = RECT{ L, by, R, by + U::BtnH };
+                i += 1;
+            }
+            by += U::BtnH + 10;
         }
     } else if (p.kind == P_LOG) {
         // ws[0] = 清空按钮，ws[1] = LogView
@@ -1025,9 +1034,11 @@ void MainWindow::Impl::on_down(POINT p) {
         RECT pr = open_combo->popup_rect();
         if (in_rect(pr, p)) {
             const int itemH = 26;
-            int idx = (p.y - pr.top - 3) / itemH;
+            int row = (p.y - pr.top - 3) / itemH;
+            int extra = (open_combo->index < 0 && !open_combo->text.empty()) ? 1 : 0;
+            int idx = row - extra;
             if (idx >= 0 && idx < (int)open_combo->items.size()) {
-                open_combo->index = idx;
+                open_combo->choose(idx);
             }
             open_combo->open = false;
             RECT inv = pr;
@@ -1093,14 +1104,16 @@ void MainWindow::Impl::on_down(POINT p) {
     Field* hitField = nullptr;
     for (auto& w : pn->ws) {
         if (!w->visible || !in_rect(w->rc, p)) continue;
-        w->on_down(p);
-        if (auto* f = dynamic_cast<Field*>(w.get())) {
-            hitField = f;
-        } else if (auto* c = dynamic_cast<Combo*>(w.get())) {
-            open_combo = c->open ? c : nullptr;
+        if (auto* c = dynamic_cast<Combo*>(w.get())) {
+            // Combo 既是可编辑输入框又是下拉：点框体=编辑，点箭头=展开
+            c->on_down(p);
+            hitField = c;
+            if (c->open) open_combo = c;
             invalidate_ctl(hwnd, c->rc);
-            RECT pr = c->popup_rect();
-            invalidate_ctl(hwnd, pr);
+            invalidate_ctl(hwnd, c->popup_rect());
+        } else {
+            w->on_down(p);
+            if (auto* f = dynamic_cast<Field*>(w.get())) hitField = f;
         }
         break;
     }
@@ -1155,6 +1168,8 @@ bool MainWindow::Impl::on_keydown(int vk, bool ctrl) {
 bool MainWindow::Impl::on_char(wchar_t c) {
     if (!focus_field) return false;
     if (focus_field->on_char(c)) {
+        // 用户手改了模型名，index 要跟着失效（变成"自定义"）
+        if (auto* cb = dynamic_cast<Combo*>(focus_field)) cb->sync_index();
         invalidate_ctl(hwnd, focus_field->rc);
         sync_ime_pos();
         return true;
@@ -1192,16 +1207,10 @@ void MainWindow::Impl::sync_ui_from_cfg() {
     if (f_max_tokens) f_max_tokens->text = std::to_wstring(cfg.ai.max_tokens);
     if (f_rounds)    f_rounds->text = std::to_wstring(cfg.ai.max_history_rounds);
     if (c_model) {
-        std::wstring want = u2w(cfg.ai.model);
-        int idx = -1;
-        for (int i = 0; i < (int)c_model->items.size(); ++i) {
-            if (c_model->items[i] == want) { idx = i; break; }
-        }
-        if (idx < 0 && !want.empty()) {
-            c_model->items.push_back(want);
-            idx = (int)c_model->items.size() - 1;
-        }
-        c_model->index = (idx < 0) ? 0 : idx;
+        c_model->text = u2w(cfg.ai.model);
+        c_model->sync_index();          // 不在预设列表里就是自定义（index = -1）
+        c_model->caret = (int)c_model->text.size();
+        c_model->anchor = -1;
     }
     if (f_ws_url)    f_ws_url->text = u2w(cfg.onebot.ws_url);
     if (f_bot_qq)    f_bot_qq->text = std::to_wstring(cfg.onebot.bot_qq);
@@ -1222,9 +1231,16 @@ void MainWindow::Impl::sync_cfg_from_ui() {
     if (f_rounds) {
         try { cfg.ai.max_history_rounds = std::stoi(w2u(f_rounds->text)); } catch (...) {}
     }
-    if (c_model && c_model->index >= 0 && c_model->index < (int)c_model->items.size()) {
-        cfg.ai.model = w2u(c_model->items[c_model->index]);
-        app.model_name = c_model->items[c_model->index];
+    if (c_model) {
+        // 直接取框里的文本，这样手输的自定义模型名也能生效
+        std::wstring m = c_model->text;
+        size_t b = m.find_first_not_of(L" \t");
+        size_t e = m.find_last_not_of(L" \t");
+        m = (b == std::wstring::npos) ? L"" : m.substr(b, e - b + 1);
+        if (!m.empty()) {
+            cfg.ai.model = w2u(m);
+            app.model_name = m;
+        }
     }
     if (f_ws_url)   cfg.onebot.ws_url = w2u(f_ws_url->text);
     if (f_bot_qq) {
@@ -1385,6 +1401,41 @@ struct TestPayload {
     std::string detail;
 };
 
+// 拉取服务端可用模型列表的结果（跨线程回传）
+struct ModelsPayload {
+    bool ok = false;
+    std::string err;
+    std::vector<std::string> models;
+};
+
+// 从服务端拉取"这个 base_url + 这个 key 真正能用"的模型列表
+void MainWindow::Impl::do_fetch_models() {
+    sync_cfg_from_ui();
+    if (cfg.ai.api_key.empty() || cfg.ai.api_key.find("在这里填入") != std::string::npos) {
+        MessageBoxW(hwnd, L"API Key 还没填（或还是占位符），先填好再拉取。",
+                    L"无法拉取", MB_OK | MB_ICONWARNING);
+        return;
+    }
+    push_log("正在拉取服务端模型列表: " + cfg.ai.base_url + "/models ...");
+    AppConfig snapshot = cfg;
+    HWND target = hwnd;
+    std::thread([snapshot, target]() {
+        ModelsPayload* mp = new (std::nothrow) ModelsPayload();
+        if (!mp) return;
+        try {
+            AIClient c(snapshot.ai);
+            mp->models = c.fetch_models(mp->err);
+            mp->ok = mp->err.empty() && !mp->models.empty();
+        } catch (const std::exception& e) {
+            mp->err = e.what();
+        } catch (...) {
+            mp->err = "unknown error";
+        }
+        if (target) PostMessageW(target, WM_APP_MODELS, 0, (LPARAM)mp);
+        else delete mp;
+    }).detach();
+}
+
 void MainWindow::Impl::test_api() {
     sync_cfg_from_ui();
     push_log("正在测试 AI 接口: " + cfg.ai.base_url + " ...");
@@ -1544,6 +1595,44 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     case WM_APP_LOG:
         self->pump_logs();
         return 0;
+
+    case WM_APP_MODELS: {
+        ModelsPayload* mp = (ModelsPayload*)lp;
+        if (mp) {
+            if (mp->ok) {
+                // 用服务端返回的真实列表替换下拉内容，并保留当前值
+                if (self->c_model) {
+                    std::wstring cur = self->c_model->text;
+                    std::vector<std::wstring> items;
+                    for (auto& m : mp->models) items.push_back(u2w(m));
+                    // 当前值不在服务端列表里时也放进去，避免用户白填
+                    bool found = false;
+                    for (auto& it : items) if (it == cur) { found = true; break; }
+                    if (!found && !cur.empty()) items.insert(items.begin(), cur);
+                    self->c_model->items = items;
+                    self->c_model->sync_index();
+                    self->layout_all();
+                    self->invalidate_all_();
+                }
+                std::string list;
+                for (size_t i = 0; i < mp->models.size() && i < 24; ++i) {
+                    if (i) list += ", ";
+                    list += mp->models[i];
+                }
+                self->push_log("已拉取到 " + std::to_string(mp->models.size()) + " 个可用模型: " + list);
+                MessageBoxW(self->hwnd,
+                            u2w("服务端开放了 " + std::to_string(mp->models.size()) + " 个模型，已填入下拉框：\n\n" + list).c_str(),
+                            L"模型列表", MB_OK | MB_ICONINFORMATION);
+            } else {
+                std::string msg = mp->err;
+                self->push_log("拉取模型列表失败: " + msg);
+                MessageBoxW(self->hwnd, u2w("拉取模型列表失败：\n" + msg).c_str(),
+                            L"无法拉取", MB_OK | MB_ICONERROR);
+            }
+            delete mp;
+        }
+        return 0;
+    }
 
     case WM_APP_TESTDONE: {
         TestPayload* tp = (TestPayload*)lp;

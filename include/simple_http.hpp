@@ -13,6 +13,95 @@ namespace simplehttp {
         std::string body;
     };
 
+    // 带鉴权头的 GET（拉取 /models 这类接口要用）
+    inline Response get_auth(const std::string& url_str, const std::string& api_key,
+                             const std::string& auth_style = "both") {
+        Response resp;
+        std::wstring full_url;
+        int len = MultiByteToWideChar(CP_UTF8, 0, url_str.c_str(), -1, NULL, 0);
+        if (len > 0) {
+            full_url.resize(len - 1);
+            MultiByteToWideChar(CP_UTF8, 0, url_str.c_str(), -1, &full_url[0], len);
+        }
+
+        URL_COMPONENTS urlComp = { 0 };
+        urlComp.dwStructSize = sizeof(urlComp);
+        urlComp.dwSchemeLength = (DWORD)-1;
+        urlComp.dwHostNameLength = (DWORD)-1;
+        urlComp.dwUrlPathLength = (DWORD)-1;
+        urlComp.dwExtraInfoLength = (DWORD)-1;
+
+        if (!WinHttpCrackUrl(full_url.c_str(), (DWORD)full_url.length(), 0, &urlComp)) return resp;
+
+        std::wstring hostName(urlComp.lpszHostName, urlComp.dwHostNameLength);
+        std::wstring urlPath(urlComp.lpszUrlPath, urlComp.dwUrlPathLength);
+        if (urlComp.dwExtraInfoLength > 0) {
+            urlPath += std::wstring(urlComp.lpszExtraInfo, urlComp.dwExtraInfoLength);
+        }
+
+        HINTERNET hSession = WinHttpOpen(L"TabMind/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+        if (!hSession) return resp;
+        DWORD protocols = WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_2 | WINHTTP_FLAG_SECURE_PROTOCOL_TLS1_3;
+        WinHttpSetOption(hSession, WINHTTP_OPTION_SECURE_PROTOCOLS, &protocols, sizeof(protocols));
+        WinHttpSetTimeouts(hSession, 30000, 30000, 60000, 60000);
+
+        HINTERNET hConnect = WinHttpConnect(hSession, hostName.c_str(), urlComp.nPort, 0);
+        if (!hConnect) { WinHttpCloseHandle(hSession); return resp; }
+
+        DWORD flags = (urlComp.nScheme == INTERNET_SCHEME_HTTPS) ? WINHTTP_FLAG_SECURE : 0;
+        HINTERNET hRequest = WinHttpOpenRequest(hConnect, L"GET", urlPath.c_str(), NULL,
+                                                WINHTTP_NO_REFERER, WINHTTP_DEFAULT_ACCEPT_TYPES, flags);
+        if (!hRequest) { WinHttpCloseHandle(hConnect); WinHttpCloseHandle(hSession); return resp; }
+
+        if (urlComp.nScheme == INTERNET_SCHEME_HTTPS) {
+            DWORD secFlags = SECURITY_FLAG_IGNORE_UNKNOWN_CA |
+                             SECURITY_FLAG_IGNORE_CERT_DATE_INVALID |
+                             SECURITY_FLAG_IGNORE_CERT_CN_INVALID |
+                             SECURITY_FLAG_IGNORE_CERT_WRONG_USAGE;
+            WinHttpSetOption(hRequest, WINHTTP_OPTION_SECURITY_FLAGS, &secFlags, sizeof(secFlags));
+        }
+
+        std::wstring headers;
+        if (!api_key.empty()) {
+            std::wstring w_key;
+            int klen = MultiByteToWideChar(CP_UTF8, 0, api_key.c_str(), -1, NULL, 0);
+            if (klen > 0) {
+                w_key.resize(klen - 1);
+                MultiByteToWideChar(CP_UTF8, 0, api_key.c_str(), -1, &w_key[0], klen);
+            }
+            if (auth_style == "api-key" || auth_style == "both") {
+                headers += L"api-key: " + w_key + L"\r\n";
+            }
+            if (auth_style == "bearer" || auth_style == "both" || auth_style.empty()) {
+                headers += L"Authorization: Bearer " + w_key + L"\r\n";
+            }
+        }
+
+        BOOL ok = WinHttpSendRequest(hRequest, headers.c_str(), (DWORD)headers.length(),
+                                     WINHTTP_NO_REQUEST_DATA, 0, 0, 0);
+        if (ok) ok = WinHttpReceiveResponse(hRequest, NULL);
+        if (ok) {
+            DWORD statusCode = 0, statusSize = sizeof(statusCode);
+            WinHttpQueryHeaders(hRequest, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+            resp.status_code = static_cast<int>(statusCode);
+            DWORD size = 0;
+            std::vector<char> buffer;
+            while (WinHttpQueryDataAvailable(hRequest, &size) && size > 0) {
+                std::vector<char> temp(size);
+                DWORD downloaded = 0;
+                if (WinHttpReadData(hRequest, temp.data(), size, &downloaded) && downloaded > 0) {
+                    buffer.insert(buffer.end(), temp.begin(), temp.begin() + downloaded);
+                }
+            }
+            resp.body.assign(buffer.begin(), buffer.end());
+        }
+        WinHttpCloseHandle(hRequest);
+        WinHttpCloseHandle(hConnect);
+        WinHttpCloseHandle(hSession);
+        return resp;
+    }
+
     inline Response get(const std::string& url_str) {
         Response resp;
         std::wstring full_url;

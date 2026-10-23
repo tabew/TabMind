@@ -412,6 +412,45 @@ std::string AIClient::send_http_request(const std::string& req_body) {
     return std::string("__HTTP_ERROR__") + std::to_string(resp.status_code) + "__" + resp.body;
 }
 
+// 拉取服务端可用模型列表：GET {base}/models
+std::vector<std::string> AIClient::fetch_models(std::string& err) {
+    std::vector<std::string> out;
+    err.clear();
+
+    std::string base = config_.base_url;
+    while (!base.empty() && base.back() == '/') base.pop_back();
+    size_t cut = base.find("/chat/completions");
+    if (cut != std::string::npos) base = base.substr(0, cut);
+    if (base.empty()) { err = "base_url 为空"; return out; }
+
+    std::string auth = config_.auth_style;
+    if (auth.empty() || auth == "both") {
+        auth = (base.find("xiaomimimo") != std::string::npos) ? "api-key" : "bearer";
+    }
+
+    auto resp = simplehttp::get_auth(base + "/models", config_.api_key, auth);
+    if (resp.status_code != 200) {
+        err = "HTTP " + std::to_string(resp.status_code) + " " +
+              resp.body.substr(0, std::min<size_t>(resp.body.size(), 300));
+        return out;
+    }
+    try {
+        auto j = nlohmann::json::parse(resp.body);
+        if (!j.contains("data") || !j["data"].is_array()) {
+            err = "返回格式里没有 data 数组（可能不是 OpenAI 兼容接口）";
+            return out;
+        }
+        for (auto& it : j["data"]) {
+            if (it.contains("id") && it["id"].is_string()) {
+                out.push_back(it["id"].get<std::string>());
+            }
+        }
+    } catch (const std::exception& e) {
+        err = std::string("返回内容不是合法 JSON: ") + e.what();
+    }
+    return out;
+}
+
 // 从错误响应里提取可读信息
 static std::string extract_error_message(const std::string& raw) {
     if (raw.rfind("__HTTP_ERROR__", 0) == 0) {
@@ -430,6 +469,15 @@ static std::string extract_error_message(const std::string& raw) {
             }
         } catch (...) {}
         if (detail.empty()) detail = body.substr(0, std::min<size_t>(body.size(), 180));
+        // 401 在这类网关上最常见的其实是"key 没有该模型的访问权限"，
+        // 报错文本却只说 authentication fails，很容易被误判成 key 写错。
+        if (code == "401") {
+            detail += " | 401 常见原因：①Key 无效/过期/额度耗尽；"
+                       "②该 Key 的分组没有当前模型的访问权限（网关权限层拦截，"
+                       "常见报错含 governor）；③base_url 与 Key 不匹配"
+                       "（厂商官方 Key 只能配该厂商的 base_url）"
+                       "。建议点「拉取模型列表」看看服务端到底开放了哪些模型";
+        }
         return "HTTP " + code + " " + detail;
     }
     if (raw.size() > 200) return raw.substr(0, 200);

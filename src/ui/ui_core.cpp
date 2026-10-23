@@ -179,7 +179,7 @@ void Field::paint(HDC dc, App& app) {
 
     RECT inner = rc;
     inner.left += 9;
-    inner.right -= 9;
+    inner.right -= 9 + reserve_right;
     if (multiline) { inner.top += 6; inner.bottom -= 6; }
 
     std::wstring vis = shown();
@@ -402,31 +402,65 @@ bool Field::on_key(int vk, bool ctrl) {
 }
 
 // ---------------------------------------------------------------------------
-// Combo
+// Combo（下拉 + 可编辑）
 // ---------------------------------------------------------------------------
+void Combo::sync_index() {
+    index = -1;
+    for (int i = 0; i < (int)items.size(); ++i) {
+        if (items[i] == text) { index = i; return; }
+    }
+}
+
+bool Combo::in_arrow(POINT p) const {
+    RECT a = { rc.right - 26, rc.top, rc.right, rc.bottom };
+    return p.x >= a.left && p.x < a.right && p.y >= a.top && p.y < a.bottom;
+}
+
+void Combo::choose(int i) {
+    if (i < 0 || i >= (int)items.size()) return;
+    text = items[i];
+    index = i;
+    caret = (int)text.size();
+    anchor = -1;
+    scroll = 0;
+}
+
 void Combo::paint(HDC dc, App& app) {
+    // 先按普通输入框画（自带光标、选区、placeholder），再叠加右侧下拉箭头
+    int saved = reserve_right;
+    reserve_right = 22;
+    Field::paint(dc, app);
+    reserve_right = saved;
+
     const ThemePalette& t = theme();
     UiGdiCache& g = ui_gdi();
-    draw::round_rect(dc, rc, 7, g.br_field, focused ? g.pen_primary : g.pen_border);
-
-    std::wstring cur = (index >= 0 && index < (int)items.size()) ? items[index] : L"";
-    draw::text(dc, app.f_body, t.text_main,
-               RECT{ rc.left + 9, rc.top, rc.right - 24, rc.bottom },
-               cur, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
-
-    HGDIOBJ op = SelectObject(dc, g.pen_text_sub);
+    HPEN pen = CreatePen(PS_SOLID, 1, focused ? t.primary : t.text_sub);
+    HGDIOBJ op = SelectObject(dc, pen);
     int cx = rc.right - 13, cy = (rc.top + rc.bottom) / 2;
     MoveToEx(dc, cx - 4, cy - 2, NULL);
     LineTo(dc, cx, cy + 2);
     LineTo(dc, cx + 4, cy - 2);
     SelectObject(dc, op);
+    DeleteObject(pen);
+    (void)g;
+}
+
+void Combo::on_down(POINT p) {
+    if (in_arrow(p)) {
+        open = !open;
+        return;
+    }
+    // 框体部分 = 普通输入行为（可打字、可选中）
+    Field::on_down(p);
 }
 
 RECT Combo::popup_rect() const {
-    int itemH = 26;
+    const int itemH = 26;
     int n = (int)items.size();
-    if (n > 8) n = 8;
-    RECT r = { rc.left, rc.bottom + 2, rc.right, rc.bottom + 2 + n * itemH + 6 };
+    if (n > 10) n = 10;
+    // 顶部额外一行显示"当前值"（当它是自定义值、不在列表里时）
+    int extra = (index < 0 && !text.empty()) ? 1 : 0;
+    RECT r = { rc.left, rc.bottom + 2, rc.right, rc.bottom + 2 + (n + extra) * itemH + 6 };
     return r;
 }
 
@@ -436,22 +470,30 @@ void Combo::paint_popup(HDC dc, App& app) {
     UiGdiCache& g = ui_gdi();
     RECT pr = popup_rect();
     draw::round_rect(dc, pr, 8, g.br_card, g.pen_border);
+
     const int itemH = 26;
     int y = pr.top + 3;
-    for (int i = 0; i < (int)items.size() && i < 8; ++i) {
+
+    // 自定义值单独一行显示在顶部
+    if (index < 0 && !text.empty()) {
+        RECT ir = { pr.left + 3, y, pr.right - 3, y + itemH };
+        draw::round_rect(dc, ir, 6, g.br_field, g.pen_null);
+        draw::text(dc, app.f_body, t.text_faint,
+                   RECT{ ir.left + 8, ir.top, ir.right - 8, ir.bottom },
+                   text + L"  (自定义)", DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        y += itemH;
+    }
+
+    for (int i = 0; i < (int)items.size() && i < 10; ++i) {
         RECT ir = { pr.left + 3, y, pr.right - 3, y + itemH };
         bool sel = (i == index);
-        if (sel) {
-            draw::round_rect(dc, ir, 6, g.br_primary_soft, g.pen_null);
-        }
+        if (sel) draw::round_rect(dc, ir, 6, g.br_primary_soft, g.pen_null);
         draw::text(dc, app.f_body, sel ? t.primary : t.text_main,
                    RECT{ ir.left + 8, ir.top, ir.right - 8, ir.bottom },
                    items[i], DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
         y += itemH;
     }
 }
-
-void Combo::on_down(POINT) { open = !open; }
 
 // ---------------------------------------------------------------------------
 // Check

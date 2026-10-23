@@ -39,6 +39,12 @@ public:
     void save_summaries_to_disk();
     void load_summaries_from_disk();
 
+    // 向服务端 GET /models，拉取当前 base_url + api_key 真正可用的模型列表。
+    // 模型名迭代快、且各网关的"可用模型"取决于 key 的权限分组，
+    // 硬编码列表必然过时 —— 让用户一键拉到真实列表才是可靠做法。
+    // 返回模型名列表；失败时 err 里是 HTTP 状态与响应摘要。
+    std::vector<std::string> fetch_models(std::string& err);
+
 private:
     AIConfig config_;
     std::string host_;
