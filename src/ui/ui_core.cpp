@@ -593,3 +593,30 @@ void LogView::on_wheel(int delta) {
     clamp_top();
     follow = (top + rows_per_page() >= (int)lines.size());
 }
+
+// 写文件日志（logs/app.log）。线程安全：内部加锁。
+#include <mutex>
+#include <ctime>
+#include <cstdio>
+void file_log(const std::string& msg) {
+    static std::mutex mtx;
+    std::lock_guard<std::mutex> lk(mtx);
+    try {
+        CreateDirectoryW(L"logs", NULL);
+        std::time_t tt = std::time(nullptr);
+        std::tm tm{};
+        localtime_s(&tm, &tt);
+        char stamp[32];
+        strftime(stamp, sizeof(stamp), "%Y-%m-%d %H:%M:%S", &tm);
+        // 用二进制模式写，自己保证 UTF-8：
+        // 文本模式 "a" 在 Windows 上是 ANSI 编码，中文会写成乱码，
+        // 服务器上排查问题全靠这个文件，乱码等于没有日志。
+        bool is_new = (GetFileAttributesA("logs\\app.log") == INVALID_FILE_ATTRIBUTES);
+        FILE* f = nullptr;
+        if (fopen_s(&f, "logs\\app.log", "ab") == 0 && f) {
+            if (is_new) fwrite("\xEF\xBB\xBF", 1, 3, f);   // UTF-8 BOM
+            fprintf(f, "[%s] %s\n", stamp, msg.c_str());
+            fclose(f);
+        }
+    } catch (...) {}
+}

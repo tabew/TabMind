@@ -226,6 +226,12 @@ struct MainWindow::Impl {
     void save_config();
     void test_api();
     void do_fetch_models();
+    // 把当前配置推给正在运行的 BotClient（换服务商/模型/key 后立即生效）
+    void apply_cfg_to_bot();
+    // UI 上的 AI 配置与内存里的 cfg 是否已经不一致（不一致就该推给 bot）
+    bool ai_cfg_changed() const;
+    // 焦点是否落在 AI 面板的某个输入框里（是则不自动同步）
+    bool editing_ai_field() const;
     void pump_logs();
     void push_log(const std::string& s);
 
@@ -311,15 +317,11 @@ void MainWindow::Impl::build_panels() {
         add_label(L"上下文轮数");
         f_rounds = add_field(false, L"10");
         add_label(L"系统提示词 / 人设");
-        {
-            auto f = std::make_unique<Field>();
-            f->multiline = true;
-            f_system = f.get();
-            p.ws.push_back(std::move(f));
-        }
 
         // 服务商预设：base_url / 鉴权方式 / 模型名是一套的，配错了就是 401。
         // 给两个一键按钮，省得手动对着文档填。
+        // 【注册顺序必须与 layout_panel 的遍历顺序一致】：预设按钮要排在
+        // 多行文本框之前，否则布局按下标取控件会串位，甚至迭代器越界。
         {
             auto mk = [&](const wchar_t* label, const char* url, const char* model) {
                 auto b = std::make_unique<Button>();
@@ -339,14 +341,22 @@ void MainWindow::Impl::build_panels() {
                     invalidate_all_();
                     // 预设必须自带落盘：用户点完预设就应当生效，
                     // 不能还要再点一次「保存配置」否则白点
+                    apply_cfg_to_bot();      // 立即让运行中的 bot 用上这套配置
                     save_layout();
                     push_log(std::string("已套用预设: ") + url + "  模型 " + model +
-                             "（鉴权方式自动），配置已保存");
+                             "（鉴权方式自动），配置已保存并已生效");
                 };
                 p.ws.push_back(std::move(b));
             };
             mk(L"DeepSeek 官方", "https://api.deepseek.com", "deepseek-flash");
             mk(L"小米 MiMo", "https://api.xiaomimimo.com/v1", "mimo-v2.5-pro");
+        }
+
+        {
+            auto f = std::make_unique<Field>();
+            f->multiline = true;
+            f_system = f.get();
+            p.ws.push_back(std::move(f));
         }
     }
 
@@ -578,7 +588,7 @@ void MainWindow::Impl::layout_panel(Panel& p) {
         y += U::LabelH + 2 + U::InputH + U::RowGap;
 
         (*it)->rc = place(L, y, CW, U::LabelH); ++it;              // 系统提示词 label
-        // 两个服务商预设按钮（并排，放在多行文本框上方）
+        // 两个服务商预设按钮（并排）
         int hPre = U::BtnH;
         int wPre = (CW - 8) / 2;
         (*it)->rc = place(L, y + U::LabelH + 2, wPre, hPre); ++it;
@@ -1408,6 +1418,7 @@ void MainWindow::Impl::toggle_bot() {
         return;
     }
     sync_cfg_from_ui();
+    apply_cfg_to_bot();
     if (cfg.ai.api_key.empty()) {
         panels[P_AI]->open = true;
         raise(P_AI);
@@ -1430,6 +1441,7 @@ void MainWindow::Impl::toggle_bot() {
 
 void MainWindow::Impl::save_config() {
     sync_cfg_from_ui();
+    apply_cfg_to_bot();      // 让正在跑的 bot 立刻用上新配置
     save_layout();
     push_log("配置已保存到 config.json");
     MessageBoxW(hwnd, L"配置已保存。", L"保存成功", MB_OK | MB_ICONINFORMATION);
@@ -1446,6 +1458,41 @@ struct ModelsPayload {
     std::string err;
     std::vector<std::string> models;
 };
+
+// 焦点是否正在 AI 面板的输入框里
+bool MainWindow::Impl::editing_ai_field() const {
+    W* f = focus_field;
+    if (!f) return false;
+    return f == (W*)f_base_url || f == (W*)f_api_key || f == (W*)f_max_tokens
+        || f == (W*)f_rounds || f == (W*)f_system || f == (W*)c_model;
+}
+
+// UI 上的 AI 配置是否已经和内存里的 cfg 不同
+bool MainWindow::Impl::ai_cfg_changed() const {
+    if (!f_base_url || !c_model) return false;
+    if (w2u(f_base_url->text) != cfg.ai.base_url) return true;
+    if (w2u(c_model->text)   != cfg.ai.model)    return true;
+    if (f_api_key && w2u(f_api_key->text) != cfg.ai.api_key) return true;
+    if (f_max_tokens) {
+        int v = 0;
+        try { v = std::stoi(w2u(f_max_tokens->text)); } catch (...) {}
+        if (v != cfg.ai.max_tokens) return true;
+    }
+    if (f_rounds) {
+        int v = 0;
+        try { v = std::stoi(w2u(f_rounds->text)); } catch (...) {}
+        if (v != cfg.ai.max_history_rounds) return true;
+    }
+    return false;
+}
+
+// 把当前配置推给正在运行的 BotClient。
+// 关键：BotClient/AIClient 构造时拷贝了配置，UI 改完若不推过去，
+// QQ 回复会一直用旧配置（表现为"测试接口"通过、QQ 却 401）。
+void MainWindow::Impl::apply_cfg_to_bot() {
+    if (!bot) return;
+    bot->update_config(cfg);
+}
 
 // 从服务端拉取"这个 base_url + 这个 key 真正能用"的模型列表
 void MainWindow::Impl::do_fetch_models() {
@@ -1620,6 +1667,17 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             return 0;
         }
         if (wp == IDT_STATUS) {
+            // 自动把 UI 上改过的 AI 配置推给运行中的 bot：
+            // 用户改完输入框直接等 QQ 回复，0.4 秒内就生效，不必记得点保存。
+            // 正在输入框里打字时不同步，免得把半截内容推过去。
+            if (self->bot && !self->editing_ai_field() && self->ai_cfg_changed()) {
+                self->sync_cfg_from_ui();
+                self->apply_cfg_to_bot();
+                self->save_layout();      // 顺手落盘，免得用户忘了点保存
+                file_log("[UI] 检测到配置已修改，已自动应用到运行中的机器人: base_url=" +
+                         self->cfg.ai.base_url + " model=" + self->cfg.ai.model);
+                self->push_log("检测到配置已修改，已自动应用到运行中的机器人");
+            }
             if (self->status_dirty) {
                 self->status_dirty = false;
                 // 侧栏状态胶囊 + 运行状态面板
@@ -1677,6 +1735,9 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
         TestPayload* tp = (TestPayload*)lp;
         if (tp) {
             if (tp->ok) {
+                // 测试通过说明这套配置是好的，顺手让运行中的 bot 也用上
+                self->sync_cfg_from_ui();
+                self->apply_cfg_to_bot();
                 self->push_log("接口测试通过，模型回复: " + tp->detail);
                 MessageBoxW(hwnd, L"接口连通，大模型已就绪。", L"测试成功",
                             MB_OK | MB_ICONINFORMATION);

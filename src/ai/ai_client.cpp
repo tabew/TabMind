@@ -188,16 +188,17 @@ static std::vector<std::string> extract_image_refs(const std::string& text) {
     return paths;
 }
 
-AIClient::AIClient(const AIConfig& config) : config_(config) {
-    parse_base_url(config_.base_url);
+AIClient::AIClient(const AIConfig& config)
+    : cfg_(std::make_shared<AIConfig>(config)) {
+    parse_base_url(cfg_get()->base_url);
     load_summaries_from_disk();
     mem_thread_ = std::thread(&AIClient::mem_worker_loop, this);
 
     // 启动时检查 API Key，避免上线后才发现 401
-    if (config_.api_key.empty()
-        || config_.api_key.find("在这里填入") != std::string::npos
-        || config_.api_key.find("your-") != std::string::npos
-        || config_.api_key.find("sk-your") != std::string::npos) {
+    if (cfg_get()->api_key.empty()
+        || cfg_get()->api_key.find("在这里填入") != std::string::npos
+        || cfg_get()->api_key.find("your-") != std::string::npos
+        || cfg_get()->api_key.find("sk-your") != std::string::npos) {
         std::cerr << "[AIClient] 警告: config.json 里的 ai.api_key 还是占位符/空的，调用小米 MiMo 会 401 Invalid API Key。\n"
                   << "          请到 https://platform.xiaomimimo.com/ 创建 API Key，并写入 config.json 的 ai.api_key。\n";
     }
@@ -330,7 +331,7 @@ void AIClient::load_summaries_from_disk() {
                 if (s == std::string::npos) continue;
                 body = body.substr(s, e - s + 1);
 
-                int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+                int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
                 memory_summaries_[ctx_id] = utf8_truncate(body, static_cast<size_t>(maxc));
             }
         }
@@ -347,7 +348,7 @@ void AIClient::load_summaries_from_disk() {
                 if (!kv.second.is_string()) continue;
                 if (memory_summaries_.count(kv.first)) continue; // txt 优先
                 std::string s = kv.second.get<std::string>();
-                int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+                int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
                 s = utf8_truncate(s, static_cast<size_t>(maxc));
                 memory_summaries_[kv.first] = s;
                 write_memory_txt(kv.first, s, maxc);
@@ -361,7 +362,7 @@ void AIClient::load_summaries_from_disk() {
 void AIClient::save_summaries_to_disk() {
     std::lock_guard<std::mutex> lock(memory_mutex_);
     try {
-        int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+        int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
         fs::create_directories(memory_dir());
         for (const auto& [ctx_id, sum_text] : memory_summaries_) {
             if (!sum_text.empty()) {
@@ -401,8 +402,8 @@ static std::string infer_auth_style(const std::string& base_url, const std::stri
 
 std::string AIClient::send_http_request(const std::string& req_body) {
     // 小米 MiMo 官方只认 api-key 头；若同时塞 Authorization: Bearer 可能被网关判为无效密钥
-    std::string auth = infer_auth_style(config_.base_url, config_.auth_style);
-    auto resp = simplehttp::post_json(config_.base_url, config_.api_key, req_body, auth);
+    std::string auth = infer_auth_style(cfg_get()->base_url, cfg_get()->auth_style);
+    auto resp = simplehttp::post_json(cfg_get()->base_url, cfg_get()->api_key, req_body, auth);
     if (resp.status_code == 200) {
         return resp.body;
     }
@@ -418,25 +419,47 @@ std::string AIClient::send_http_request(const std::string& req_body) {
     return std::string("__HTTP_ERROR__") + std::to_string(resp.status_code) + "__" + resp.body;
 }
 
+// 热更新配置：原子替换整个配置对象。
+// 之后所有请求都用新配置，不需要重启 bot、不需要断开重连。
+// 取加锁的配置快照。所有对配置的读取都必须经过这里。
+std::shared_ptr<const AIConfig> AIClient::cfg_get() const {
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    return cfg_;
+}
+
+void AIClient::update_config(const AIConfig& cfg) {
+    auto fresh = std::make_shared<AIConfig>(cfg);
+    {
+        std::lock_guard<std::mutex> lk(cfg_mtx_);
+        cfg_ = fresh;
+    }
+    parse_base_url(fresh->base_url);
+}
+
+AIConfig AIClient::snapshot_config() const {
+    std::lock_guard<std::mutex> lk(cfg_mtx_);
+    return *cfg_;
+}
+
 // 拉取服务端可用模型列表：GET {base}/models
 std::vector<std::string> AIClient::fetch_models(std::string& err) {
     std::vector<std::string> out;
     err.clear();
 
-    std::string base = config_.base_url;
+    std::string base = cfg_get()->base_url;
     while (!base.empty() && base.back() == '/') base.pop_back();
     size_t cut = base.find("/chat/completions");
     if (cut != std::string::npos) base = base.substr(0, cut);
     if (base.empty()) { err = "base_url 为空"; return out; }
 
-    std::string auth = infer_auth_style(base, config_.auth_style);
+    std::string auth = infer_auth_style(base, cfg_get()->auth_style);
 
-    auto resp = simplehttp::get_auth(base + "/models", config_.api_key, auth);
+    auto resp = simplehttp::get_auth(base + "/models", cfg_get()->api_key, auth);
     // 鉴权头被配错时（该用 Bearer 却发了 api-key，反之亦然）网关一律回 401，
     // 换个头再试一次，省得用户去猜到底该填哪种
     if (resp.status_code == 401 || resp.status_code == 403) {
         std::string alt = (auth == "api-key") ? "bearer" : "api-key";
-        auto resp2 = simplehttp::get_auth(base + "/models", config_.api_key, alt);
+        auto resp2 = simplehttp::get_auth(base + "/models", cfg_get()->api_key, alt);
         if (resp2.status_code == 200) { resp = resp2; auth = alt; }
     }
     if (resp.status_code != 200) {
@@ -497,13 +520,13 @@ static std::string extract_error_message(const std::string& raw) {
 std::string AIClient::call_model(const std::string& model, const nlohmann::json& messages,
                                  int max_tokens, float temperature) {
     nlohmann::json req_json = nlohmann::json::object();
-    req_json["model"] = model.empty() ? std::string(config_.model) : model;
+    req_json["model"] = model.empty() ? std::string(cfg_get()->model) : model;
     req_json["messages"] = messages;
     // 显式 double，避免 float 隐式转成 bool
     req_json["temperature"] = static_cast<double>(temperature);
     req_json["max_tokens"] = max_tokens;
     // 仅在需要时发送 enable_thinking，避免部分网关拒识未知/false 字段
-    if (config_.enable_thinking) {
+    if (cfg_get()->enable_thinking) {
         req_json["enable_thinking"] = true;
     }
 
@@ -566,7 +589,7 @@ void AIClient::observe(const std::string& context_id, const std::string& line) {
         buf.push_back(line);
         // 缓冲本身也限长，防止简写前膨胀
         while (buf.size() > 80) buf.pop_front();
-        int need = config_.memory_batch_size > 0 ? config_.memory_batch_size : 8;
+        int need = cfg_get()->memory_batch_size > 0 ? cfg_get()->memory_batch_size : 8;
         should_queue = static_cast<int>(buf.size()) >= need;
     }
     // 攒够 → 丢给后台线程简写，绝不阻塞当前消息/回复
@@ -626,21 +649,21 @@ void AIClient::do_summarize(const std::string& context_id) {
             joined += " ";
             joined += ln;
         }
-        int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+        int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
         memory_summaries_[context_id] = utf8_truncate(joined, static_cast<size_t>(maxc));
         buf.clear();
         write_memory_txt(context_id, memory_summaries_[context_id], maxc);
         return;
     }
 
-    int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+    int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
     new_summary = utf8_truncate(new_summary, static_cast<size_t>(maxc));
 
     {
         std::lock_guard<std::mutex> lock(memory_mutex_);
         memory_summaries_[context_id] = new_summary;
         memory_buffer_[context_id].clear();
-        int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+        int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
         write_memory_txt(context_id, new_summary, maxc);
     }
 }
@@ -648,7 +671,7 @@ void AIClient::do_summarize(const std::string& context_id) {
 std::string AIClient::summarize_context(const std::string& context_id,
                                         const std::string& old_summary,
                                         const std::vector<std::string>& new_lines) {
-    int maxc = config_.memory_max_chars > 0 ? config_.memory_max_chars : 1000;
+    int maxc = cfg_get()->memory_max_chars > 0 ? cfg_get()->memory_max_chars : 1000;
 
     std::string joined;
     for (const auto& ln : new_lines) {
@@ -683,7 +706,7 @@ std::string AIClient::summarize_context(const std::string& context_id,
     messages.push_back(user_msg);
 
     // 简写用更保守的采样
-    std::string result = call_model(config_.model, messages, 800, 0.3f);
+    std::string result = call_model(cfg_get()->model, messages, 800, 0.3f);
     // 兜底：去掉可能的引号/前缀
     while (!result.empty() && (result.front() == ' ' || result.front() == '\n' || result.front() == '"' || result.front() == '「')) {
         result.erase(result.begin());
@@ -711,7 +734,7 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     nlohmann::json messages = nlohmann::json::array();
 
     // 1. 系统主提示词 + 动态注入长期记忆摘要
-    std::string full_sys_prompt = config_.system_prompt;
+    std::string full_sys_prompt = cfg_get()->system_prompt;
     if (!current_summary.empty()) {
         full_sys_prompt += "\n\n【关于本会话的已知长期记忆摘要】:\n" + current_summary;
     }
@@ -748,19 +771,19 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     // 3. 当前用户输入（支持多模态图片）
     std::vector<std::string> data_urls;
     for (const auto& p : image_paths) {
-        std::string du = image_to_data_url(p, config_.auto_delete_images);
+        std::string du = image_to_data_url(p, cfg_get()->auto_delete_images);
         if (!du.empty()) data_urls.push_back(du);
     }
     // 兜底：从文本里的 CQ:image 再抓一遍
     if (data_urls.empty()) {
         for (const auto& p : extract_image_refs(user_prompt)) {
-            std::string du = image_to_data_url(p, config_.auto_delete_images);
+            std::string du = image_to_data_url(p, cfg_get()->auto_delete_images);
             if (!du.empty()) data_urls.push_back(du);
         }
     }
 
     // 看完即删：清掉本条关联的本地图片（含未送视觉的）
-    if (config_.auto_delete_images) {
+    if (cfg_get()->auto_delete_images) {
         for (const auto& p : image_paths) {
             remove_local_image(p);
         }
@@ -772,12 +795,12 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     nlohmann::json user_msg = nlohmann::json::object();
     user_msg["role"] = "user";
 
-    std::string model_for_call = config_.model;
+    std::string model_for_call = cfg_get()->model;
     bool has_vision = !data_urls.empty();
     if (has_vision) {
         // 有图 → 走视觉模型
-        if (!config_.vision_model.empty()) {
-            model_for_call = config_.vision_model;
+        if (!cfg_get()->vision_model.empty()) {
+            model_for_call = cfg_get()->vision_model;
         }
         nlohmann::json content = nlohmann::json::array();
         nlohmann::json text_part = nlohmann::json::object();
@@ -801,12 +824,12 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     messages.push_back(user_msg);
 
     // 识图请求给更多输出预算，避免被截断/空回复
-    int tokens_for_call = config_.max_tokens;
+    int tokens_for_call = cfg_get()->max_tokens;
     if (has_vision) {
-        tokens_for_call = std::max(config_.max_tokens, 1500);
+        tokens_for_call = std::max(cfg_get()->max_tokens, 1500);
     }
     last_error_.clear();
-    std::string reply = call_model(model_for_call, messages, tokens_for_call, config_.temperature);
+    std::string reply = call_model(model_for_call, messages, tokens_for_call, cfg_get()->temperature);
     std::string vision_err = last_error_;
 
     // 视觉请求失败 → 用最简纯文本请求兜底（从零重建，不复用可能被污染的 messages）
@@ -821,7 +844,7 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
         user2["content"] = user_prompt.empty() ? std::string("[对方发来一张图]") : (user_prompt + "（对方发了图）");
         messages2.push_back(user2);
         last_error_.clear();
-        reply = call_model(config_.model, messages2, config_.max_tokens, config_.temperature);
+        reply = call_model(cfg_get()->model, messages2, cfg_get()->max_tokens, cfg_get()->temperature);
         if (reply.empty() && last_error_.empty() && !vision_err.empty()) {
             last_error_ = vision_err;
         }

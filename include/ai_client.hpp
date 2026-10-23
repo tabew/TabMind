@@ -39,6 +39,17 @@ public:
     void save_summaries_to_disk();
     void load_summaries_from_disk();
 
+    // 热更新配置（换服务商/换模型/换 key 后调用），立即对后续请求生效
+    void update_config(const AIConfig& cfg);
+
+    // 取一份加锁的配置快照指针。
+    // 所有读取都必须走它：cfg_ 是 shared_ptr，update_config 会整体替换它，
+    // 直接裸读 cfg_ 会和替换操作竞争（曾经导致 0xC0000409 崩溃）。
+    std::shared_ptr<const AIConfig> cfg_get() const;
+
+    // 取一份配置快照（需要一致视图时用）
+    AIConfig snapshot_config() const;
+
     // 向服务端 GET /models，拉取当前 base_url + api_key 真正可用的模型列表。
     // 模型名迭代快、且各网关的"可用模型"取决于 key 的权限分组，
     // 硬编码列表必然过时 —— 让用户一键拉到真实列表才是可靠做法。
@@ -46,7 +57,12 @@ public:
     std::vector<std::string> fetch_models(std::string& err);
 
 private:
-    AIConfig config_;
+    // 配置用 shared_ptr 持有：改配置时原子替换整个对象，
+    // 正在跑的工作线程不受影响，也不需要加锁。
+    // 之前这里是 AIConfig config_（值拷贝），改完配置后 QQ 那边永远用旧的
+    // —— 「测试接口」用的是新配置所以能过，QQ 回复却还是旧配置报 401。
+    std::shared_ptr<AIConfig> cfg_;
+    mutable std::mutex cfg_mtx_;          // 保护 cfg_ 的替换
     std::string host_;
     std::string path_prefix_;
     bool is_ssl_ = false;

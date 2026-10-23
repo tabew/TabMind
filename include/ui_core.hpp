@@ -188,5 +188,10 @@ namespace draw {
 std::wstring u2w(const std::string& s);
 std::string  w2u(const std::wstring& w);
 
+// 写文件日志：logs/app.log
+// 服务器上跑的是 GUI 程序，没有控制台可看，出问题只能靠日志文件排查。
+// 所有关键事件（连接、配置变更、错误）都往这里落一份。
+void file_log(const std::string& msg);
+
 // 日志级别判定
 int log_level_of(const std::string& raw);

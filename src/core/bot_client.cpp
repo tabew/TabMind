@@ -1,4 +1,5 @@
 #include "bot_client.hpp"
+#include "ui_core.hpp"
 #include "ui_window.hpp"
 #include "simple_json.hpp"
 #include <iostream>
@@ -36,6 +37,7 @@ static std::string transform_cq_image_paths(const std::string& text) {
 
 static void log_info(const std::string& msg) {
     std::cout << msg << std::endl;
+    file_log(msg);                       // 服务器上没有控制台，靠文件看日志
     MainWindow::get_instance().log(msg);
 }
 
@@ -61,6 +63,15 @@ BotClient::BotClient(const AppConfig& config)
 
 BotClient::~BotClient() {
     stop();
+}
+
+// 热更新配置：把新的 ai 配置推到 AIClient，后续请求立即使用新配置。
+// OneBot 的 ws_url 若变了则需要重连，这里只处理 AI 侧（换服务商/换模型/换 key）。
+void BotClient::update_config(const AppConfig& config) {
+    config_ = config;
+    ai_client_.update_config(config.ai);
+    log_info("[BotClient] 配置已热更新: base_url=" + config.ai.base_url +
+             " model=" + config.ai.model);
 }
 
 void BotClient::start() {
