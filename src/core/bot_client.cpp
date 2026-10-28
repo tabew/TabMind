@@ -67,6 +67,10 @@ BotClient::~BotClient() {
 
 // 热更新配置：把新的 ai 配置推到 AIClient，后续请求立即使用新配置。
 // OneBot 的 ws_url 若变了则需要重连，这里只处理 AI 侧（换服务商/换模型/换 key）。
+AIClient::CacheStat BotClient::cache_stat() const {
+    return ai_client_.cache_stat();
+}
+
 void BotClient::update_config(const AppConfig& config) {
     config_ = config;
     ai_client_.update_config(config.ai);

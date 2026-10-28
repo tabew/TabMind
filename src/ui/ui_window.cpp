@@ -772,10 +772,10 @@ void MainWindow::Impl::paint_status_card(HDC dc, Panel& p) {
     if (y + h > p.rc.bottom - 8) h = p.rc.bottom - 8 - y;
     if (h < 18) h = 18;
 
-    int w1 = W * 30 / 100;
-    int w2 = W * 42 / 100;
+    int w1 = W * 27 / 100;
+    int w2 = W * 38 / 100;
     int w3 = W - w1 - w2 - 12;
-    if (w3 < 50) w3 = 50;
+    if (w3 < 46) w3 = 46;
 
     bool run = bot_running;
     RECT r1 = { L, y, L + w1, y + h };
@@ -789,6 +789,31 @@ void MainWindow::Impl::paint_status_card(HDC dc, Panel& p) {
                L"模型 " + app.model_name, app.f_small);
     draw::pill(dc, r3, g.br_field, t.text_main,
                L"已回复 " + std::to_wstring(msg_count), app.f_small);
+
+    // 第二行：前缀缓存命中率 —— 直接反映缓存优化有没有生效
+    AIClient::CacheStat cs = app.cache_stat;
+    int y2 = y + h + 8;
+    if (y2 + 24 <= p.rc.bottom - 6) {
+        int pct = (int)(cs.rate * 100.0 + 0.5);
+        COLORREF fg = t.text_main;
+        HBRUSH bg = g.br_field;
+        bool has_data = (cs.hit + cs.miss) > 0;
+        if (has_data) {
+            if (pct >= 70)      { bg = g.br_success_soft; fg = t.success_text; }
+            else if (pct >= 35) { bg = g.br_primary_soft; fg = t.primary; }
+            else               { bg = g.br_danger_soft;  fg = t.danger; }
+        }
+        std::wstring label = L"缓存命中 ";
+        label += has_data ? (std::to_wstring(pct) + L"%") : (L"--（暂无数据）");
+        RECT rc2 = { L, y2, L + W, y2 + 24 };
+        draw::pill(dc, rc2, bg, fg, label, app.f_small);
+        if (has_data) {
+            draw::text(dc, app.f_small, t.text_faint,
+                       RECT{ L + W - 160, y2, L + W, y2 + 24 },
+                       L"命中 " + std::to_wstring(cs.hit) + L" / 未命中 " + std::to_wstring(cs.miss),
+                       DT_RIGHT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS);
+        }
+    }
 }
 
 void MainWindow::Impl::paint_plugin_card(HDC dc, Panel& p) {
@@ -1684,6 +1709,14 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
                 RECT a = { 0, 54, U::SidebarW, 92 };
                 invalidate_ctl(hwnd, a);
                 invalidate_ctl(hwnd, self->panels[P_STATUS]->rc);
+            }
+            // 刷新前缀缓存命中统计（400ms 一次，代价极小）
+            if (self->bot) {
+                AIClient::CacheStat cs = self->bot->cache_stat();
+                if (cs.hit != self->app.cache_stat.hit || cs.miss != self->app.cache_stat.miss) {
+                    self->app.cache_stat = cs;
+                    invalidate_ctl(hwnd, self->panels[P_STATUS]->rc);
+                }
             }
             return 0;
         }

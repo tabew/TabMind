@@ -5,6 +5,7 @@
 #include <memory>
 #include <functional>
 #include "config.hpp"
+#include "ai_client.hpp"
 #include "ui_theme.hpp"
 
 // ---------------------------------------------------------------------------
@@ -65,6 +66,7 @@ struct App {
     bool bot_running = false;
     int  msg_count = 0;
     std::wstring model_name;
+    AIClient::CacheStat cache_stat;   // AI 前缀缓存命中统计
 };
 
 // ---------------------------------------------------------------------------

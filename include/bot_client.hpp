@@ -14,6 +14,9 @@ public:
     // 之前 BotClient 构造时拷贝了一份配置，之后 UI 改什么都没用，
     // 表现就是「测试接口」能过、QQ 回复却还是旧配置报 401。
     void update_config(const AppConfig& config);
+
+    // 转发 AI 侧的缓存命中统计（滑动窗口）
+    AIClient::CacheStat cache_stat() const;
     ~BotClient();
 
     // 启动 WebSocket 连接

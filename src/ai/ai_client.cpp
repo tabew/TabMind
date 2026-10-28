@@ -493,6 +493,30 @@ AIConfig AIClient::snapshot_config() const {
     return *cfg_;
 }
 
+// 记录一次请求的缓存命中情况（滑动窗口，保留最近 32 次）
+void AIClient::record_cache(int hit, int miss) {
+    if (hit <= 0 && miss <= 0) return;
+    std::lock_guard<std::mutex> lk(cache_mtx_);
+    cache_window_.push_back({ hit, miss });
+    while (cache_window_.size() > 32) cache_window_.pop_front();
+}
+
+AIClient::CacheStat AIClient::cache_stat() const {
+    CacheStat st;
+    std::lock_guard<std::mutex> lk(cache_mtx_);
+    for (const auto& c : cache_window_) {
+        st.hit += c.hit;
+        st.miss += c.miss;
+    }
+    if (!cache_window_.empty()) {
+        st.last_hit = cache_window_.back().hit;
+        st.last_miss = cache_window_.back().miss;
+    }
+    long long total = st.hit + st.miss;
+    st.rate = total > 0 ? (double)st.hit / (double)total : 0.0;
+    return st;
+}
+
 // 拉取服务端可用模型列表：GET {base}/models
 std::vector<std::string> AIClient::fetch_models(std::string& err) {
     std::vector<std::string> out;
@@ -606,6 +630,24 @@ std::string AIClient::call_model(const std::string& model, const nlohmann::json&
 
     try {
         nlohmann::json resp_json = nlohmann::json::parse(resp_str);
+        // 统计缓存命中（DeepSeek 用 prompt_cache_hit_tokens / prompt_cache_miss_tokens；
+        // 其它网关可能叫 cached_tokens / cache_read_input_tokens）
+        if (resp_json.contains("usage") && resp_json["usage"].is_object()) {
+            const auto& u = resp_json["usage"];
+            int hit = 0, miss = 0;
+            auto pick = [&](const char* a, const char* b) -> int {
+                if (u.contains(a) && u[a].is_number()) return u[a].get<int>();
+                if (b && u.contains(b) && u[b].is_number()) return u[b].get<int>();
+                return 0;
+            };
+            hit  = pick("prompt_cache_hit_tokens", "cached_tokens");
+            miss = pick("prompt_cache_miss_tokens", "cache_read_input_tokens");
+            if (hit == 0 && miss == 0 && u.contains("prompt_tokens") && u["prompt_tokens"].is_number()) {
+                // 某些网关只给总 prompt_tokens，无法区分命中
+                miss = u["prompt_tokens"].get<int>();
+            }
+            record_cache(hit, miss);
+        }
         if (resp_json.contains("choices") && !resp_json["choices"].empty()) {
             const auto& msg = resp_json["choices"][0]["message"];
             std::string text;
@@ -778,41 +820,40 @@ std::string AIClient::summarize_context(const std::string& context_id,
     return result;
 }
 
-std::string AIClient::chat(const std::string& context_id, const std::string& user_prompt,
-                           const std::vector<std::string>& image_paths,
-                           bool allow_silent) {
-    std::lock_guard<std::mutex> chat_lock(chat_mutex_);
-
-    std::string current_summary;
-    std::deque<ChatMessage> recent_msgs;
-
-    {
-        std::lock_guard<std::mutex> lock(memory_mutex_);
-        current_summary = memory_summaries_[context_id];
-        recent_msgs = recent_sessions_[context_id];
-    }
-
+// 构造请求消息数组。
+//
+// 【前缀缓存的核心约束】服务端只对「请求开头连续相同的 token」命中缓存。
+// 因此 system message 和历史消息必须逐字节稳定；任何会变的内容
+// （长期记忆摘要、插话规则）都放到最后一条 user message 的开头。
+// 这样每次请求变化的只有最后一条，前面的稳定前缀持续命中缓存。
+nlohmann::json AIClient::build_messages(const std::string& system_prompt,
+                                        const std::deque<ChatMessage>& recent_msgs,
+                                        const std::string& user_prompt,
+                                        const std::string& current_summary,
+                                        bool allow_silent) const {
     nlohmann::json messages = nlohmann::json::array();
 
-    // 1. 系统主提示词 + 动态注入长期记忆摘要
-    // 源头清洗：提示词 / 记忆摘要 / 用户消息里可能混有脏字节
-    // （典型来源：AI 生成的长期记忆摘要里有半个 emoji）
-    std::string raw_sys = cfg_get()->system_prompt;
-    std::string full_sys_prompt = sanitize_utf8(raw_sys);
-    if (full_sys_prompt.size() != raw_sys.size()) {
-        file_log("[AIClient] 提示词含非法 UTF-8 字节，已自动清洗: "
-                 + std::to_string(raw_sys.size() - full_sys_prompt.size()) + " 字节被替换");
+    // ---- system：固定提示词，永不变化（缓存锚点）----
+    nlohmann::json sys_msg = nlohmann::json::object();
+    sys_msg["role"] = "system";
+    sys_msg["content"] = sanitize_utf8(system_prompt);
+    messages.push_back(sys_msg);
+
+    // ---- 历史消息：顺序稳定 ----
+    for (const auto& msg : recent_msgs) {
+        nlohmann::json m = nlohmann::json::object();
+        m["role"] = msg.role;
+        m["content"] = msg.content;
+        messages.push_back(m);
     }
+
+    // ---- 动态内容：统一放到最后一条 user 开头 ----
+    std::string dynamic_inject;
     if (!current_summary.empty()) {
-        std::string clean_summary = sanitize_utf8(current_summary);
-        if (clean_summary.size() != current_summary.size()) {
-            file_log("[AIClient] 长期记忆摘要含非法 UTF-8 字节，已自动清洗");
-            current_summary.swap(clean_summary);
-        }
-        full_sys_prompt += "\n\n【关于本会话的已知长期记忆摘要】:\n" + current_summary;
+        dynamic_inject += "\n\n【关于本会话的已知长期记忆摘要】:\n" + sanitize_utf8(current_summary);
     }
     if (allow_silent) {
-        full_sys_prompt +=
+        dynamic_inject +=
             "\n\n【自主插话规则 — 必须极其克制】\n"
             "默认闭嘴。只有满足下面【任意一条】才可以开口，否则一律 [SILENT]：\n"
             "1. 点名塔菲/艾特塔菲，或明显在跟塔菲说话；\n"
@@ -828,20 +869,46 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
             "若决定不回复：整条回复只输出 [SILENT]（不要任何其他字）。";
     }
 
-    nlohmann::json sys_msg = nlohmann::json::object();
-    sys_msg["role"] = "system";
-    sys_msg["content"] = full_sys_prompt;
-    messages.push_back(sys_msg);
+    nlohmann::json user_msg = nlohmann::json::object();
+    user_msg["role"] = "user";
+    user_msg["content"] = dynamic_inject + user_prompt;
+    messages.push_back(user_msg);
+    return messages;
+}
 
-    // 2. 携带最近短期消息
-    for (const auto& msg : recent_msgs) {
-        nlohmann::json m = nlohmann::json::object();
-        m["role"] = msg.role;
-        m["content"] = msg.content;
-        messages.push_back(m);
+std::string AIClient::chat(const std::string& context_id, const std::string& user_prompt,
+                           const std::vector<std::string>& image_paths,
+                           bool allow_silent) {
+    std::lock_guard<std::mutex> chat_lock(chat_mutex_);
+
+    std::string current_summary;
+    std::deque<ChatMessage> recent_msgs;
+
+    {
+        std::lock_guard<std::mutex> lock(memory_mutex_);
+        current_summary = memory_summaries_[context_id];
+        recent_msgs = recent_sessions_[context_id];
     }
 
+    // 源头清洗：提示词可能混有脏字节（典型来源：AI 生成的摘要里有半个 emoji）
+    std::string raw_sys = cfg_get()->system_prompt;
+    {
+        std::string clean_sys = sanitize_utf8(raw_sys);
+        if (clean_sys.size() != raw_sys.size()) {
+            file_log("[AIClient] 提示词含非法 UTF-8 字节，已自动清洗: "
+                     + std::to_string(raw_sys.size() - clean_sys.size()) + " 字节被替换");
+            raw_sys.swap(clean_sys);
+        }
+    }
+    {
+        std::string clean_sum = sanitize_utf8(current_summary);
+        if (clean_sum.size() != current_summary.size()) {
+            file_log("[AIClient] 长期记忆摘要含非法 UTF-8 字节，已自动清洗");
+            current_summary.swap(clean_sum);
+        }
+    }
     // 3. 当前用户输入（支持多模态图片）
+    //    注意：图片要先收集，因为有图时要换文案并走视觉模型。
     std::vector<std::string> data_urls;
     for (const auto& p : image_paths) {
         std::string du = image_to_data_url(p, cfg_get()->auto_delete_images);
@@ -865,24 +932,33 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
         }
     }
 
-    nlohmann::json user_msg = nlohmann::json::object();
-    user_msg["role"] = "user";
-
     std::string model_for_call = cfg_get()->model;
     bool has_vision = !data_urls.empty();
+    std::string text_for_model = user_prompt;
     if (has_vision) {
-        // 有图 → 走视觉模型
         if (!cfg_get()->vision_model.empty()) {
             model_for_call = cfg_get()->vision_model;
         }
+        if (text_for_model.empty()) text_for_model = "请看图并用一句话说感受";
+    }
+
+    // 4. 构造请求消息
+    //    build_messages 保证了 system 与历史消息逐字节稳定（缓存锚点），
+    //    动态内容统一在最后一条 user 的开头。
+    nlohmann::json messages = build_messages(raw_sys, recent_msgs, text_for_model,
+                                            current_summary, allow_silent);
+
+    // 5. 有图时把最后一条 user 改成 OpenAI 多模态数组格式
+    //    （文本部分沿用 build_messages 拼好的内容，动态注入仍在其中）
+    if (has_vision) {
+        std::string text_with_dyn =
+            messages[messages.size() - 1]["content"].get<std::string>();
         nlohmann::json content = nlohmann::json::array();
         nlohmann::json text_part = nlohmann::json::object();
         text_part["type"] = std::string("text");
-        std::string text_for_vision = user_prompt.empty() ? "请看图并用一句话说感受" : user_prompt;
-        text_part["text"] = text_for_vision;
+        text_part["text"] = text_with_dyn;
         content.push_back(text_part);
         for (const auto& du : data_urls) {
-            // 标准 OpenAI 视觉格式：{"type":"image_url","image_url":{"url":"..."}}
             nlohmann::json img_part = nlohmann::json::object();
             img_part["type"] = std::string("image_url");
             nlohmann::json img_url = nlohmann::json::object();
@@ -890,11 +966,8 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
             img_part["image_url"] = img_url;
             content.push_back(img_part);
         }
-        user_msg["content"] = content;
-    } else {
-        user_msg["content"] = user_prompt;
+        messages[messages.size() - 1]["content"] = content;
     }
-    messages.push_back(user_msg);
 
     // 识图请求给更多输出预算，避免被截断/空回复
     int tokens_for_call = cfg_get()->max_tokens;
@@ -907,15 +980,11 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
 
     // 视觉请求失败 → 用最简纯文本请求兜底（从零重建，不复用可能被污染的 messages）
     if (reply.empty() && has_vision) {
-        nlohmann::json messages2 = nlohmann::json::array();
-        nlohmann::json sys2 = nlohmann::json::object();
-        sys2["role"] = std::string("system");
-        sys2["content"] = full_sys_prompt;
-        messages2.push_back(sys2);
-        nlohmann::json user2 = nlohmann::json::object();
-        user2["role"] = std::string("user");
-        user2["content"] = user_prompt.empty() ? std::string("[对方发来一张图]") : (user_prompt + "（对方发了图）");
-        messages2.push_back(user2);
+        std::string fb_text = user_prompt.empty()
+            ? std::string("[对方发来一张图]")
+            : (user_prompt + "（对方发了图）");
+        nlohmann::json messages2 = build_messages(raw_sys, recent_msgs, fb_text,
+                                                 current_summary, allow_silent);
         last_error_.clear();
         reply = call_model(cfg_get()->model, messages2, cfg_get()->max_tokens, cfg_get()->temperature);
         if (reply.empty() && last_error_.empty() && !vision_err.empty()) {

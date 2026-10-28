@@ -42,6 +42,26 @@ public:
     // 热更新配置（换服务商/换模型/换 key 后调用），立即对后续请求生效
     void update_config(const AIConfig& cfg);
 
+    // 构造发给模型的消息数组。
+    // 单独抽出来是为了能写单元测试验证一件事：
+    // **system message 与历史消息在任何情况下都逐字节相同**（前缀缓存的前提）。
+    // 会变的内容（长期记忆摘要、插话规则）一律放到最后一条 user message 开头。
+    nlohmann::json build_messages(const std::string& system_prompt,
+                                  const std::deque<ChatMessage>& recent_msgs,
+                                  const std::string& user_prompt,
+                                  const std::string& current_summary,
+                                  bool allow_silent) const;
+
+    // 缓存命中统计（滑动窗口：最近 32 次请求）
+    struct CacheStat {
+        long long hit = 0;        // 命中 token 数
+        long long miss = 0;       // 未命中 token 数
+        double rate = 0.0;        // 命中率 0~1
+        int last_hit = 0;         // 最近一次命中的 token 数
+        int last_miss = 0;
+    };
+    CacheStat cache_stat() const;
+
     // 取一份加锁的配置快照指针。
     // 所有读取都必须走它：cfg_ 是 shared_ptr，update_config 会整体替换它，
     // 直接裸读 cfg_ 会和替换操作竞争（曾经导致 0xC0000409 崩溃）。
@@ -96,4 +116,10 @@ private:
     void do_summarize(const std::string& context_id);
 
     std::string last_error_;
+
+    // 缓存命中统计（滑动窗口）
+    struct CacheSample { int hit = 0; int miss = 0; };
+    mutable std::mutex cache_mtx_;
+    std::deque<CacheSample> cache_window_;   // 最近 N 次
+    void record_cache(int hit, int miss);
 };
