@@ -499,6 +499,16 @@ void AIClient::record_cache(int hit, int miss) {
     std::lock_guard<std::mutex> lk(cache_mtx_);
     cache_window_.push_back({ hit, miss });
     while (cache_window_.size() > 32) cache_window_.pop_front();
+    // 每 8 次请求记一条汇总，便于在 logs/app.log 里观察命中率走势
+    if (cache_window_.size() % 8 == 0) {
+        long long th = 0, tm = 0;
+        for (const auto& c : cache_window_) { th += c.hit; tm += c.miss; }
+        long long total = th + tm;
+        int pct = total > 0 ? (int)(th * 100 / total) : 0;
+        file_log("[AIClient] 缓存命中 " + std::to_string(pct) + "% (命中 " +
+                 std::to_string(th) + " / 未命中 " + std::to_string(tm) + ")，本次命中 " +
+                 std::to_string(hit) + " 未命中 " + std::to_string(miss));
+    }
 }
 
 AIClient::CacheStat AIClient::cache_stat() const {
@@ -1015,18 +1025,50 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
         reply = trimmed;
     }
 
-    // 更新短期记忆队列 (最多保留最近 2 轮；图片以占位符记入，省 token)
+    // ------------------------------------------------------------------------
+    // 更新短期历史。
+    //
+    // 【前缀缓存的关键】历史消息必须和上一轮"实际发出去"的内容逐字节一致，
+    // 否则前缀在历史部分立刻分叉，缓存只能命中 system 一小段（约 20%）。
+    //
+    // 因此这里有两个硬性要求：
+    //   1) 存的就是 user_prompt 原文，**绝不能附加任何占位符**（老代码加了
+    //      " [图片xN]"，导致历史永远对不上）
+    //   2) 历史长度用 config 的 max_history_rounds（老代码硬编码 2 轮）。
+    //      窗口越大、滑动越少，缓存命中越久。
+    //
+    // 滑动时按"一对 user+assistant"弹出，保持角色交替规律，也让每次
+    // 滑动只损失一次前缀而不是频繁小步滑。
+    // ------------------------------------------------------------------------
     {
-        std::string mem_user = user_prompt;
-        if (!image_paths.empty() || !data_urls.empty()) {
-            mem_user += " [图片x" + std::to_string(data_urls.empty() ? image_paths.size() : data_urls.size()) + "]";
-        }
+        size_t max_lines = (size_t)cfg_get()->max_history_rounds * 2;
+        if (max_lines < 2) max_lines = 2;
+        if (max_lines > 40) max_lines = 40;      // 上限保护，避免历史无限膨胀
+
         std::lock_guard<std::mutex> lock(memory_mutex_);
         auto& q = recent_sessions_[context_id];
-        q.push_back({"user", mem_user});
+        q.push_back({"user", user_prompt});
         q.push_back({"assistant", reply});
-        while (q.size() > 4) {
-            q.pop_front();
+
+        // 达到上限时**整体清空重启**，而不是滑动删头。
+        //
+        // 原因：前缀缓存只认「从头开始连续相同」的 token。滑动删头会让
+        // 下一次请求的开头变成 msg3...（而这次是 msg1...），前缀当场断裂，
+        // 缓存只剩 system 一段 —— 这正是命中率只有 20% 的元凶。
+        //
+        // 整体清空 + 保留最近 2 轮，让新的一段重新建立稳定前缀：
+        //   前 N 轮历史只增不删 → 每次都能命中上一次的全部内容
+        //   每攒满一次才损失一次缓存，频率远低于滑动
+        // 上下文不丢：老对话已经进了长期记忆摘要。
+        if (q.size() > max_lines) {
+            std::deque<ChatMessage> keep;
+            size_t keep_n = 4;                       // 保留最近 2 轮
+            if (keep_n > q.size()) keep_n = q.size();
+            size_t start = q.size() - keep_n;
+            if (start % 2 != 0) ++start;             // 对齐到 user 开头
+            for (size_t i = start; i < q.size(); ++i) keep.push_back(q[i]);
+            q.swap(keep);
+            file_log("[AIClient] 历史窗口已满，重新开始记录（前缀缓存重新建立）");
         }
     }
 
