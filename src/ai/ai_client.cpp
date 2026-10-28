@@ -493,6 +493,32 @@ AIConfig AIClient::snapshot_config() const {
     return *cfg_;
 }
 
+// 汇总所有会话的长期记忆摘要
+std::string AIClient::all_memory_summary() const {
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    std::string out;
+    for (const auto& kv : memory_summaries_) {
+        if (kv.second.empty()) continue;
+        out += "[" + kv.first + "]\n" + kv.second + "\n\n";
+    }
+    return out;
+}
+
+// 单次生成：不写历史、不进记忆（避免污染日常对话上下文）
+std::string AIClient::generate_text(const std::string& prompt, float temperature) {
+    std::lock_guard<std::mutex> chat_lock(chat_mutex_);
+    nlohmann::json messages = nlohmann::json::array();
+    nlohmann::json sys = nlohmann::json::object();
+    sys["role"] = "system";
+    sys["content"] = sanitize_utf8(cfg_get()->system_prompt);
+    messages.push_back(sys);
+    nlohmann::json u = nlohmann::json::object();
+    u["role"] = "user";
+    u["content"] = sanitize_utf8(prompt);
+    messages.push_back(u);
+    return call_model(cfg_get()->model, messages, cfg_get()->max_tokens, temperature);
+}
+
 // 记录一次请求的缓存命中情况（滑动窗口，保留最近 32 次）
 void AIClient::record_cache(int hit, int miss) {
     if (hit <= 0 && miss <= 0) return;

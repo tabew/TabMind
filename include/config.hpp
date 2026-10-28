@@ -17,6 +17,14 @@ struct OneBotConfig {
     // 自主判断是否回复：false 时仅 @/前缀触发；true 时未@也交给模型判断该不该说话
     bool smart_reply = true;
     std::vector<std::string> trigger_prefixes = {"/chat", "/ai", "你好"};
+
+    // ---- 每日 QQ 空间说说 ----
+    // 到点自动综合长期记忆写一条说说发到 QQ 空间（NapCat 的 send_qzone_msg）。
+    bool qzone_daily = false;          // 开关
+    int  qzone_hour = 20;              // 几点发（0-23）
+    int  qzone_minute = 0;             // 几分发
+    // 查看权限：1 所有人 / 4 好友 / 16 部分好友 / 64 仅自己 / 128 部分好友不可见
+    int  qzone_ugc_right = 4;          // 默认仅好友可见，避免公开发到陌生人面前
 };
 
 struct AIConfig {
@@ -94,6 +102,10 @@ struct AppConfig {
                 if (ob.contains("group_require_at")) config.onebot.group_require_at = ob["group_require_at"].get<bool>();
                 if (ob.contains("at_exempt_plugins")) config.onebot.at_exempt_plugins = ob["at_exempt_plugins"].get<std::vector<std::string>>();
                 if (ob.contains("smart_reply")) config.onebot.smart_reply = ob["smart_reply"].get<bool>();
+                if (ob.contains("qzone_daily")) config.onebot.qzone_daily = ob["qzone_daily"].get<bool>();
+                if (ob.contains("qzone_hour")) config.onebot.qzone_hour = ob["qzone_hour"].get<int>();
+                if (ob.contains("qzone_minute")) config.onebot.qzone_minute = ob["qzone_minute"].get<int>();
+                if (ob.contains("qzone_ugc_right")) config.onebot.qzone_ugc_right = ob["qzone_ugc_right"].get<int>();
                 if (ob.contains("trigger_prefixes")) config.onebot.trigger_prefixes = ob["trigger_prefixes"].get<std::vector<std::string>>();
             }
 
@@ -157,6 +169,10 @@ struct AppConfig {
             }
             ob["at_exempt_plugins"] = exempt;
         }
+        ob["qzone_daily"] = onebot.qzone_daily;
+        ob["qzone_hour"] = onebot.qzone_hour;
+        ob["qzone_minute"] = onebot.qzone_minute;
+        ob["qzone_ugc_right"] = onebot.qzone_ugc_right;
         ob["smart_reply"] = onebot.smart_reply;
 
         nlohmann::json prefixes = nlohmann::json::array();

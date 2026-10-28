@@ -52,6 +52,16 @@ public:
                                   const std::string& current_summary,
                                   bool allow_silent) const;
 
+    // 最近一次错误信息（调用 generate_text / chat 失败后可读）
+    std::string last_error() const { return last_error_; }
+
+    // 汇总所有会话的长期记忆摘要（供"每日说说"等跨会话功能使用）
+    std::string all_memory_summary() const;
+
+    // 单次生成文本：不写入历史、不进记忆库，适合"生成说说"这类一次性任务。
+    // temperature 用高一些让文本更活。
+    std::string generate_text(const std::string& prompt, float temperature = 0.9f);
+
     // 缓存命中统计（滑动窗口：最近 32 次请求）
     struct CacheStat {
         long long hit = 0;        // 命中 token 数
@@ -93,7 +103,7 @@ private:
     std::unordered_map<std::string, std::deque<std::string>> memory_buffer_;
     // 仅保留最近短期上下文
     std::unordered_map<std::string, std::deque<ChatMessage>> recent_sessions_;
-    std::mutex memory_mutex_;
+    mutable std::mutex memory_mutex_;
     std::mutex chat_mutex_;
 
     // 后台记忆简写线程（绝不挡回复）

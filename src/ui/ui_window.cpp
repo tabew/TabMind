@@ -437,6 +437,25 @@ void MainWindow::Impl::build_panels() {
         mk_btn(L"保存配置", false, [this]() { save_config(); });
         mk_btn(L"测试接口", false, [this]() { test_api(); });
         mk_btn(L"拉取模型", false, [this]() { do_fetch_models(); });
+        mk_btn(L"发条说说", false, [this]() {
+            if (!bot) {
+                push_log("机器人未启动，先点「启动机器人」");
+                MessageBoxW(hwnd, L"机器人还没启动，先点上面的「启动机器人」。",
+                            L"无法发送", MB_OK | MB_ICONWARNING);
+                return;
+            }
+            push_log("正在综合记忆生成 QQ 空间说说...");
+            sync_cfg_from_ui();
+            apply_cfg_to_bot();
+            // 后台生成+发送，避免卡住 UI
+            HWND target = hwnd;
+            std::thread([this, target]() {
+                try {
+                    if (bot) bot->post_qzone_now();
+                } catch (...) {}
+                if (target) PostMessageW(target, WM_APP_TESTDONE, 1, 0);
+            }).detach();
+        });
         mk_btn(L"高级设置", false, [this]() {
             if (ui_dialogs::show_advanced_settings(hwnd, cfg, inst)) {
                 cfg.save_to_file("config.json");
@@ -1765,6 +1784,11 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
     }
 
     case WM_APP_TESTDONE: {
+        // wp==1 表示"发说说"这条链路的完成回调（没有 payload）
+        if (wp == 1) {
+            self->push_log("说说任务已执行，结果见 logs/app.log");
+            return 0;
+        }
         TestPayload* tp = (TestPayload*)lp;
         if (tp) {
             if (tp->ok) {

@@ -17,6 +17,14 @@ public:
 
     // 转发 AI 侧的缓存命中统计（滑动窗口）
     AIClient::CacheStat cache_stat() const;
+
+    // 发一条 QQ 空间说说（NapCat 扩展接口 send_qzone_msg）
+    bool send_qzone(const std::string& content,
+                    const std::vector<std::string>& images = {},
+                    int ugc_right = 4);
+
+    // 手动触发一次"发说说"（给 UI 上的按钮用）
+    void post_qzone_now();
     ~BotClient();
 
     // 启动 WebSocket 连接
@@ -36,6 +44,13 @@ private:
     AppConfig config_;
     AIClient ai_client_;
     std::unique_ptr<MessageHandler> msg_handler_;
+
+    // 每日 QQ 空间说说的定时线程
+    std::thread qzone_thread_;
+    std::atomic<bool> qzone_running_{true};
+    void qzone_loop();
+    bool qzone_already_posted_today() const;
+    void mark_qzone_posted_today();
     simplews::WebSocketClient websocket_;
     bool is_running_ = false;
 
