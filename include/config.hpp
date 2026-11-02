@@ -40,7 +40,16 @@ struct AIConfig {
     std::string auth_style = "auto";
     // 关闭思考模式：防止 reasoning 吃光 max_tokens 导致 content 为空（识图失败常见原因）
     bool enable_thinking = false;
-    std::string system_prompt = "你是一个真实自然、富有幽默感和同理心的 QQ 好友。请用口语化、接地气的短句与我交流，每次回复尽量只说 1~2 句话，不要长篇大论，避免分点罗列或书面说教。你能看到群友发的图片，请结合图片内容回应。";
+    // ---- 提示词分两层 ----
+    // persona_prompt：用户自定义的**角色人设**。在 UI 里编辑，是**对外可见**的部分 ——
+    //   群友问"你是什么设定"时可以照实介绍。
+    std::string persona_prompt =
+        "你是一条住在屏幕另一头的鲸鱼娘，聪明但懒、嘴甜、有点傲娇。\n"
+        "说话像真人：绝大多数时候只发一条，长度有变化，别像复读机。";
+    // system_prompt：**输出规则**（格式、引用回复、禁 emoji、破功约束等机制）。
+    // 由程序内置（AIClient::kDefaultSystemRules），客户端永远看不到。
+    // 留空 = 使用内置规则；高级用户可在此覆盖（一般不需要动）。
+    std::string system_prompt = "";
     float temperature = 0.7f;
     int max_tokens = 1000;
     // 短期上下文轮数。窗口越大，前缀前缀缓存命中越久（命中部分价格只有
@@ -119,6 +128,7 @@ struct AppConfig {
                 if (ai.contains("vision_model")) config.ai.vision_model = ai["vision_model"].get<std::string>();
                 if (ai.contains("auth_style")) config.ai.auth_style = ai["auth_style"].get<std::string>();
                 if (ai.contains("enable_thinking")) config.ai.enable_thinking = ai["enable_thinking"].get<bool>();
+                if (ai.contains("persona_prompt")) config.ai.persona_prompt = ai["persona_prompt"].get<std::string>();
                 if (ai.contains("system_prompt")) config.ai.system_prompt = ai["system_prompt"].get<std::string>();
                 if (ai.contains("temperature")) config.ai.temperature = ai["temperature"].get<float>();
                 if (ai.contains("max_tokens")) config.ai.max_tokens = ai["max_tokens"].get<int>();
@@ -191,6 +201,7 @@ struct AppConfig {
         ai_obj["vision_model"] = ai.vision_model;
         ai_obj["auth_style"] = ai.auth_style;
         ai_obj["enable_thinking"] = ai.enable_thinking;
+        ai_obj["persona_prompt"] = ai.persona_prompt;
         ai_obj["system_prompt"] = ai.system_prompt;
         ai_obj["temperature"] = ai.temperature;
         ai_obj["max_tokens"] = ai.max_tokens;

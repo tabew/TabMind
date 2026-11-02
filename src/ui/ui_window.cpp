@@ -316,7 +316,7 @@ void MainWindow::Impl::build_panels() {
         f_max_tokens = add_field(false, L"1000");
         add_label(L"上下文轮数");
         f_rounds = add_field(false, L"10");
-        add_label(L"系统提示词 / 人设");
+        add_label(L"人设（对外可见）· 输出规则内置");
 
         // 服务商预设：base_url / 鉴权方式 / 模型名是一套的，配错了就是 401。
         // 给两个一键按钮，省得手动对着文档填。
@@ -1302,7 +1302,7 @@ static std::wstring join_list(const std::vector<std::string>& v) {
 void MainWindow::Impl::sync_ui_from_cfg() {
     if (f_base_url)  f_base_url->text = u2w(cfg.ai.base_url);
     if (f_api_key)   f_api_key->text = u2w(cfg.ai.api_key);
-    if (f_system)    f_system->text = u2w(cfg.ai.system_prompt);
+    if (f_system)    f_system->text = u2w(cfg.ai.persona_prompt);
     if (f_max_tokens) f_max_tokens->text = std::to_wstring(cfg.ai.max_tokens);
     if (f_rounds)    f_rounds->text = std::to_wstring(cfg.ai.max_history_rounds);
     if (c_model) {
@@ -1323,7 +1323,8 @@ void MainWindow::Impl::sync_ui_from_cfg() {
 void MainWindow::Impl::sync_cfg_from_ui() {
     if (f_base_url) cfg.ai.base_url = w2u(f_base_url->text);
     if (f_api_key)  cfg.ai.api_key = w2u(f_api_key->text);
-    if (f_system)   cfg.ai.system_prompt = w2u(f_system->text);
+    // UI 里编辑的是「人设」= 对外可见部分；输出规则由程序内置，不在这里
+    if (f_system)   cfg.ai.persona_prompt = w2u(f_system->text);
     if (f_max_tokens) {
         try { cfg.ai.max_tokens = std::stoi(w2u(f_max_tokens->text)); } catch (...) {}
     }
@@ -1525,6 +1526,7 @@ bool MainWindow::Impl::ai_cfg_changed() const {
     if (w2u(f_base_url->text) != cfg.ai.base_url) return true;
     if (w2u(c_model->text)   != cfg.ai.model)    return true;
     if (f_api_key && w2u(f_api_key->text) != cfg.ai.api_key) return true;
+    if (f_system && w2u(f_system->text) != cfg.ai.persona_prompt) return true;
     if (f_max_tokens) {
         int v = 0;
         try { v = std::stoi(w2u(f_max_tokens->text)); } catch (...) {}

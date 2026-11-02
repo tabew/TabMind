@@ -12,9 +12,10 @@
         "memory_max_chars": 1000,
         "model": "deepseek-flash",
         "reply_cooldown_sec": 45,
-        "system_prompt": "你是一个友好、简洁的 QQ 聊天助手。请用自然、口语化的中文回复，回答问题要直接，不要长篇大论。",
+        "system_prompt": "",
         "temperature": 0.85,
-        "vision_model": ""
+        "vision_model": "",
+        "persona_prompt": "你是一个真实自然、富有幽默感的 QQ 好友，说话口语化、接地气。\n像真人聊天：绝大多数时候只发一条，长度有变化，别像复读机。"
     },
     "onebot": {
         "access_token": "",

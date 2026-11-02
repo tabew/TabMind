@@ -52,6 +52,10 @@ public:
                                   const std::string& current_summary,
                                   bool allow_silent) const;
 
+    // 拼装最终的 system message：内置输出规则 + 用户自定义人设。
+    // 规则（格式/机制）由程序内置、客户端不可见；人设（persona_prompt）对外可见。
+    static std::string compose_system_prompt(const AIConfig& cfg);
+
     // 最近一次错误信息（调用 generate_text / chat 失败后可读）
     std::string last_error() const { return last_error_; }
 
