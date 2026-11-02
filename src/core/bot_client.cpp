@@ -199,6 +199,10 @@ AIClient::CacheStat BotClient::cache_stat() const {
     return ai_client_.cache_stat();
 }
 
+bool BotClient::gateway_reports_cache() const {
+    return ai_client_.gateway_reports_cache();
+}
+
 void BotClient::update_config(const AppConfig& config) {
     config_ = config;
     ai_client_.update_config(config.ai);

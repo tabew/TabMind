@@ -678,11 +678,24 @@ std::string AIClient::call_model(const std::string& model, const nlohmann::json&
             };
             hit  = pick("prompt_cache_hit_tokens", "cached_tokens");
             miss = pick("prompt_cache_miss_tokens", "cache_read_input_tokens");
-            if (hit == 0 && miss == 0 && u.contains("prompt_tokens") && u["prompt_tokens"].is_number()) {
-                // 某些网关只给总 prompt_tokens，无法区分命中
-                miss = u["prompt_tokens"].get<int>();
+
+            // 判断网关到底有没有返回缓存相关字段。
+            // 关键：不能因为"没返回"就当成"全部未命中"——那会让 UI 永远显示
+            // 0%，让人误以为优化没生效，而实际是网关根本不汇报这个数据。
+            bool reports_cache =
+                u.contains("prompt_cache_hit_tokens") || u.contains("prompt_cache_miss_tokens") ||
+                u.contains("cached_tokens")           || u.contains("cache_read_input_tokens");
+            if (reports_cache) {
+                record_cache(hit, miss);
+                mark_gateway_reports_cache(true);
+            } else {
+                mark_gateway_reports_cache(false);
+                if (u.contains("prompt_tokens") && u["prompt_tokens"].is_number()) {
+                    file_log("[AIClient] 网关只返回 prompt_tokens=" +
+                             std::to_string(u["prompt_tokens"].get<int>()) +
+                             "，未提供缓存命中字段（无法统计命中率）");
+                }
             }
-            record_cache(hit, miss);
         }
         if (resp_json.contains("choices") && !resp_json["choices"].empty()) {
             const auto& msg = resp_json["choices"][0]["message"];
@@ -884,13 +897,21 @@ nlohmann::json AIClient::build_messages(const std::string& system_prompt,
     }
 
     // ---- 动态内容：统一放到最后一条 user 开头 ----
+    //
+    // 【必须包成"背景资料"】之前直接把记忆摘要裸拼在用户消息前面，模型经常
+    // 把这段当成了要输出的内容，或者当成"要我总结的资料"，于是直接吐出一长条
+    // 记忆。这里用显式边界包起来，并明确写"不要复述"。
     std::string dynamic_inject;
+    bool has_dynamic = !current_summary.empty() || allow_silent;
+    if (has_dynamic) {
+        dynamic_inject += "==== 背景资料（只供你自己参考，绝对不要在回复里复述、总结或引用）====\n";
+    }
     if (!current_summary.empty()) {
-        dynamic_inject += "\n\n【关于本会话的已知长期记忆摘要】:\n" + sanitize_utf8(current_summary);
+        dynamic_inject += "【你已知的长期记忆】\n" + sanitize_utf8(current_summary) + "\n\n";
     }
     if (allow_silent) {
         dynamic_inject +=
-            "\n\n【自主插话规则 — 必须极其克制】\n"
+            "【是否该开口的判断规则】\n"
             "默认闭嘴。只有满足下面【任意一条】才可以开口，否则一律 [SILENT]：\n"
             "1. 点名塔菲/艾特塔菲，或明显在跟塔菲说话；\n"
             "2. 直接向塔菲提问、求助、要评价；\n"
@@ -903,6 +924,10 @@ nlohmann::json AIClient::build_messages(const std::string& system_prompt,
             "- 群里已经很吵，不需要你刷存在感。\n"
             "若决定回复：禁止输出 [SILENT]，只说 1~2 句短句。\n"
             "若决定不回复：整条回复只输出 [SILENT]（不要任何其他字）。";
+    }
+
+    if (has_dynamic) {
+        dynamic_inject += "==== 背景资料结束 ====\n\n【对方刚说的话（只需回应这部分）】\n";
     }
 
     nlohmann::json user_msg = nlohmann::json::object();
@@ -1067,8 +1092,10 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     // 滑动只损失一次前缀而不是频繁小步滑。
     // ------------------------------------------------------------------------
     {
+        // 至少 4 轮（8 条）：窗口太小的话"清空重启"会退化成每轮滑动，
+        // 反而让前缀缓存每轮都断。
         size_t max_lines = (size_t)cfg_get()->max_history_rounds * 2;
-        if (max_lines < 2) max_lines = 2;
+        if (max_lines < 8) max_lines = 8;
         if (max_lines > 40) max_lines = 40;      // 上限保护，避免历史无限膨胀
 
         std::lock_guard<std::mutex> lock(memory_mutex_);
@@ -1089,6 +1116,8 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
         if (q.size() > max_lines) {
             std::deque<ChatMessage> keep;
             size_t keep_n = 4;                       // 保留最近 2 轮
+            if (keep_n > max_lines / 2) keep_n = max_lines / 2;   // 不超过窗口一半
+            if (keep_n < 2) keep_n = 2;
             if (keep_n > q.size()) keep_n = q.size();
             size_t start = q.size() - keep_n;
             if (start % 2 != 0) ++start;             // 对齐到 user 开头

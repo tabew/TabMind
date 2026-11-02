@@ -816,14 +816,22 @@ void MainWindow::Impl::paint_status_card(HDC dc, Panel& p) {
         int pct = (int)(cs.rate * 100.0 + 0.5);
         COLORREF fg = t.text_main;
         HBRUSH bg = g.br_field;
-        bool has_data = (cs.hit + cs.miss) > 0;
+        bool has_data = (cs.hit + cs.miss) > 0 && !app.cache_unsupported;
         if (has_data) {
             if (pct >= 70)      { bg = g.br_success_soft; fg = t.success_text; }
             else if (pct >= 35) { bg = g.br_primary_soft; fg = t.primary; }
             else               { bg = g.br_danger_soft;  fg = t.danger; }
         }
         std::wstring label = L"缓存命中 ";
-        label += has_data ? (std::to_wstring(pct) + L"%") : (L"--（暂无数据）");
+        if (app.cache_unsupported) {
+            label = L"缓存统计：网关未提供该字段";
+            bg = g.br_field;
+            fg = t.text_faint;
+        } else if (has_data) {
+            label += std::to_wstring(pct) + L"%";
+        } else {
+            label += L"--（暂无数据）";
+        }
         RECT rc2 = { L, y2, L + W, y2 + 24 };
         draw::pill(dc, rc2, bg, fg, label, app.f_small);
         if (has_data) {
@@ -1732,8 +1740,12 @@ LRESULT CALLBACK MainWindow::Impl::proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM l
             // 刷新前缀缓存命中统计（400ms 一次，代价极小）
             if (self->bot) {
                 AIClient::CacheStat cs = self->bot->cache_stat();
-                if (cs.hit != self->app.cache_stat.hit || cs.miss != self->app.cache_stat.miss) {
+                bool unsup = !self->bot->gateway_reports_cache();
+                if (cs.hit != self->app.cache_stat.hit ||
+                    cs.miss != self->app.cache_stat.miss ||
+                    unsup != self->app.cache_unsupported) {
                     self->app.cache_stat = cs;
+                    self->app.cache_unsupported = unsup;
                     invalidate_ctl(hwnd, self->panels[P_STATUS]->rc);
                 }
             }

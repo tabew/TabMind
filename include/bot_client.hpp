@@ -17,6 +17,7 @@ public:
 
     // 转发 AI 侧的缓存命中统计（滑动窗口）
     AIClient::CacheStat cache_stat() const;
+    bool gateway_reports_cache() const;
 
     // 发一条 QQ 空间说说（NapCat 扩展接口 send_qzone_msg）
     bool send_qzone(const std::string& content,

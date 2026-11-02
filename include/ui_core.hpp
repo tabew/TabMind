@@ -67,6 +67,7 @@ struct App {
     int  msg_count = 0;
     std::wstring model_name;
     AIClient::CacheStat cache_stat;   // AI 前缀缓存命中统计
+    bool cache_unsupported = false;   // 网关不汇报缓存字段（此时不能显示 0%）
 };
 
 // ---------------------------------------------------------------------------

@@ -72,6 +72,11 @@ public:
     };
     CacheStat cache_stat() const;
 
+    // 网关是否汇报了缓存字段。
+    // false 时 UI 应显示"网关不支持统计"，而不是 0% —— 那会误导人以为优化没生效。
+    bool gateway_reports_cache() const { return gateway_cache_support_.load() != 0; }
+    void mark_gateway_reports_cache(bool yes) { gateway_cache_support_ = yes ? 1 : 0; }
+
     // 取一份加锁的配置快照指针。
     // 所有读取都必须走它：cfg_ 是 shared_ptr，update_config 会整体替换它，
     // 直接裸读 cfg_ 会和替换操作竞争（曾经导致 0xC0000409 崩溃）。
@@ -131,5 +136,6 @@ private:
     struct CacheSample { int hit = 0; int miss = 0; };
     mutable std::mutex cache_mtx_;
     std::deque<CacheSample> cache_window_;   // 最近 N 次
+    std::atomic<int> gateway_cache_support_{-1};   // -1 未知 / 0 不汇报 / 1 汇报
     void record_cache(int hit, int miss);
 };
