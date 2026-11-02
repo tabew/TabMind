@@ -121,8 +121,11 @@ private:
 
     void parse_base_url(const std::string& url);
     std::string send_http_request(const std::string& req_body);
+    // count_cache：是否把这次请求计入缓存命中统计。
+    // 摘要、发说说这类"一次性生成"（每次内容都不同、本来就 0 命中）
+    // 必须传 false，否则会把真实对话的命中率稀释掉。
     std::string call_model(const std::string& model, const nlohmann::json& messages,
-                           int max_tokens, float temperature);
+                           int max_tokens, float temperature, bool count_cache = true);
     std::string summarize_context(const std::string& context_id,
                                   const std::string& old_summary,
                                   const std::vector<std::string>& new_lines);

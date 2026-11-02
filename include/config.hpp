@@ -43,7 +43,9 @@ struct AIConfig {
     std::string system_prompt = "你是一个真实自然、富有幽默感和同理心的 QQ 好友。请用口语化、接地气的短句与我交流，每次回复尽量只说 1~2 句话，不要长篇大论，避免分点罗列或书面说教。你能看到群友发的图片，请结合图片内容回应。";
     float temperature = 0.7f;
     int max_tokens = 1000;
-    int max_history_rounds = 10;
+    // 短期上下文轮数。窗口越大，前缀前缀缓存命中越久（命中部分价格只有
+    // 未命中的 1/50，多带历史几乎不花钱）；太小则频繁"清空重启"，命中率崩。
+    int max_history_rounds = 15;
     // 长期记忆简写上限（字，按 Unicode 字符计）
     int memory_max_chars = 1000;
     // 攒够多少条新消息后触发一次自动简写

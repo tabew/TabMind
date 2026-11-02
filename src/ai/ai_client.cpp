@@ -516,7 +516,7 @@ std::string AIClient::generate_text(const std::string& prompt, float temperature
     u["role"] = "user";
     u["content"] = sanitize_utf8(prompt);
     messages.push_back(u);
-    return call_model(cfg_get()->model, messages, cfg_get()->max_tokens, temperature);
+    return call_model(cfg_get()->model, messages, cfg_get()->max_tokens, temperature, false);
 }
 
 // 记录一次请求的缓存命中情况（滑动窗口，保留最近 32 次）
@@ -534,6 +534,13 @@ void AIClient::record_cache(int hit, int miss) {
         file_log("[AIClient] 缓存命中 " + std::to_string(pct) + "% (命中 " +
                  std::to_string(th) + " / 未命中 " + std::to_string(tm) + ")，本次命中 " +
                  std::to_string(hit) + " 未命中 " + std::to_string(miss));
+        if (pct < 40) {
+            file_log("[AIClient] 命中率偏低，常见原因：①网关不支持前缀缓存"
+                     "（若状态面板显示'网关未提供该字段'即属此类）；"
+                     "②历史窗口频繁清空重启（可调大 max_history_rounds）；"
+                     "③多个群聊/私聊交替请求，各自历史不同，只有 system 段能共享；"
+                     "④单条消息特别长（长文/多图）拉低了比例");
+        }
     }
 }
 
@@ -630,7 +637,7 @@ static std::string extract_error_message(const std::string& raw) {
 }
 
 std::string AIClient::call_model(const std::string& model, const nlohmann::json& messages,
-                                 int max_tokens, float temperature) {
+                                 int max_tokens, float temperature, bool count_cache) {
     nlohmann::json req_json = nlohmann::json::object();
     req_json["model"] = model.empty() ? std::string(cfg_get()->model) : model;
     req_json["messages"] = messages;
@@ -686,7 +693,7 @@ std::string AIClient::call_model(const std::string& model, const nlohmann::json&
                 u.contains("prompt_cache_hit_tokens") || u.contains("prompt_cache_miss_tokens") ||
                 u.contains("cached_tokens")           || u.contains("cache_read_input_tokens");
             if (reports_cache) {
-                record_cache(hit, miss);
+                if (count_cache) record_cache(hit, miss);   // 摘要/说说不计入
                 mark_gateway_reports_cache(true);
             } else {
                 mark_gateway_reports_cache(false);
@@ -858,7 +865,7 @@ std::string AIClient::summarize_context(const std::string& context_id,
     messages.push_back(user_msg);
 
     // 简写用更保守的采样
-    std::string result = call_model(cfg_get()->model, messages, 800, 0.3f);
+    std::string result = call_model(cfg_get()->model, messages, 800, 0.3f, false);
     // 兜底：去掉可能的引号/前缀
     while (!result.empty() && (result.front() == ' ' || result.front() == '\n' || result.front() == '"' || result.front() == '「')) {
         result.erase(result.begin());

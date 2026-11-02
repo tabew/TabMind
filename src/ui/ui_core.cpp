@@ -238,9 +238,24 @@ void Field::paint(HDC dc, App& app) {
         auto lines = split_lines(vis);
         const int lineH = 19;
         int first = scroll;
+
+        // 光标自动跟随：先把光标所在行算出来，需要时滚动到可见
+        int caretLine = 0;
+        if (focused) {
+            for (int i = 0; i < (int)vis.size() && i < caret; ++i) {
+                if (vis[i] == L'\n') ++caretLine;
+            }
+        }
+        int visibleLines = (inner.bottom - inner.top) / lineH;
+        if (visibleLines < 1) visibleLines = 1;
+        if (focused) {
+            if (caretLine < first) first = caretLine;
+            else if (caretLine >= first + visibleLines) first = caretLine - visibleLines + 1;
+        }
         if (first < 0) first = 0;
         if (first >= (int)lines.size()) first = (int)lines.size() - 1;
         if (first < 0) first = 0;
+        scroll = first;
 
         int sv2 = SaveDC(dc);
         IntersectClipRect(dc, inner.left, inner.top, inner.right, inner.bottom);
@@ -274,6 +289,24 @@ void Field::paint(HDC dc, App& app) {
         RestoreDC(dc, sv2);
     }
     SelectObject(dc, oldFont);
+}
+
+// 鼠标滚轮：多行输入框上下滚动（每格 3 行）
+void Field::on_wheel(int delta) {
+    if (!multiline || delta == 0) return;
+    auto lines = split_lines(shown());
+    int n = (int)lines.size();
+    if (n <= 0) return;
+    int steps = delta / WHEEL_DELTA;      // 通常 ±1
+    if (steps == 0) steps = (delta > 0 ? 1 : -1);
+    scroll -= steps * 3;                  // 向上滚 delta>0
+    const int inner_h = rc.bottom - rc.top - 12;
+    int visibleLines = inner_h / 19;
+    if (visibleLines < 1) visibleLines = 1;
+    int maxFirst = n - visibleLines;
+    if (maxFirst < 0) maxFirst = 0;
+    if (scroll > maxFirst) scroll = maxFirst;
+    if (scroll < 0) scroll = 0;
 }
 
 void Field::on_down(POINT p) {

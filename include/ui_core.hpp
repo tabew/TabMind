@@ -110,6 +110,7 @@ struct Field : W {
     bool focusable() const override { return true; }
     void paint(HDC dc, App& app) override;
     void on_down(POINT p) override;
+    void on_wheel(int delta) override;
     bool on_char(wchar_t c) override;
     bool on_key(int vk, bool ctrl) override;
 
