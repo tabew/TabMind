@@ -121,6 +121,10 @@ public:
     // temperature 用高一些让文本更活。
     std::string generate_text(const std::string& prompt, float temperature = 0.9f);
 
+    // 按完整对话轮次滚动短期历史，返回被移出窗口的消息。
+    // 由调用方在 memory_mutex_ 内操作 recent_sessions_，再统一补记长期记忆。
+    static std::deque<ChatMessage> trim_recent_history(
+        std::deque<ChatMessage>& history, size_t max_rounds);
     // 缓存命中统计（滑动窗口：最近 32 次请求）
     struct CacheStat {
         long long hit = 0;        // 命中 token 数

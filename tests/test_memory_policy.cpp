@@ -2,6 +2,7 @@
 #include <string>
 #include "ai_client.hpp"
 
+static void test_history_rolling();
 static int fails = 0;
 static void check(bool ok, const char* msg) {
     std::printf("%s %s\n", ok ? "PASS" : "FAIL", msg);
@@ -32,6 +33,19 @@ int main() {
 
     // 换行也当断句符
     check(MemoryPolicy::retain_latest("aaa\nbbb\nccc", 7) == "bbb\nccc", "换行可作为断句点");
+    test_history_rolling();
     std::printf("\n结果: %s\n", fails == 0 ? "PASS 全部通过" : "FAIL");
     return fails == 0 ? 0 : 1;
+}
+static void test_history_rolling() {
+    std::deque<ChatMessage> h;
+    for (int i = 1; i <= 6; ++i) {
+        h.push_back({"user", "问题" + std::to_string(i)});
+        h.push_back({"assistant", "回答" + std::to_string(i)});
+    }
+    auto removed = AIClient::trim_recent_history(h, 4);
+    check(h.size() == 8 && removed.size() == 4, "历史严格保留最近四轮");
+    check(h.front().content == "问题3" && h.back().content == "回答6", "滚动后顺序和轮次完整");
+    check(removed.front().content == "问题1" && removed.back().content == "回答2", "移出的旧轮次可补记长期记忆");
+    check(AIClient::trim_recent_history(h, 4).empty(), "未超限时不改历史、不触发缓存断裂");
 }

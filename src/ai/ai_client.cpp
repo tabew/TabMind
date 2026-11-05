@@ -1045,6 +1045,26 @@ nlohmann::json AIClient::build_messages(const std::string& system_prompt,
     return messages;
 }
 
+std::deque<ChatMessage> AIClient::trim_recent_history(
+    std::deque<ChatMessage>& history, size_t max_rounds) {
+    std::deque<ChatMessage> removed;
+    const size_t max_messages = max_rounds * 2;
+    while (history.size() > max_messages) {
+        // 从 user 开始成对移除，绝不让保留下来的历史以 assistant 开头。
+        if (history.front().role != "user") {
+            removed.push_back(history.front());
+            history.pop_front();
+            continue;
+        }
+        removed.push_back(history.front());
+        history.pop_front();
+        if (!history.empty() && history.front().role == "assistant") {
+            removed.push_back(history.front());
+            history.pop_front();
+        }
+    }
+    return removed;
+}
 std::string AIClient::chat(const std::string& context_id, const std::string& user_prompt,
                            const std::vector<std::string>& image_paths,
                            bool allow_silent) {
@@ -1178,10 +1198,15 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
         if (trimmed == "[SILENT]" || trimmed == "SILENT" || trimmed == "[SILENT]。") {
             return "";
         }
-        // 含 [SILENT] 且几乎没别的内容
-        if (trimmed.find("[SILENT]") != std::string::npos && utf8_length(trimmed) <= 10) {
-            return "";
+        // 标记只应独立出现；若模型把标记夹在正文中，去掉标记而不是误发控制指令。
+        size_t silent_pos;
+        while ((silent_pos = trimmed.find("[SILENT]")) != std::string::npos) {
+            trimmed.erase(silent_pos, 8);
         }
+        s = trimmed.find_first_not_of(" \t\r\n。，,");
+        if (s == std::string::npos) return "";
+        e = trimmed.find_last_not_of(" \t\r\n");
+        trimmed = trimmed.substr(s, e - s + 1);
         reply = trimmed;
     }
 
@@ -1201,38 +1226,45 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
     // 滑动只损失一次前缀而不是频繁小步滑。
     // ------------------------------------------------------------------------
     {
-        // 至少 4 轮（8 条）：窗口太小的话"清空重启"会退化成每轮滑动，
-        // 反而让前缀缓存每轮都断。
-        size_t max_lines = (size_t)cfg_get()->max_history_rounds * 2;
-        if (max_lines < 8) max_lines = 8;
-        if (max_lines > 40) max_lines = 40;      // 上限保护，避免历史无限膨胀
+        // 只保留配置允许的最近 N 轮。每移出一轮就立即补入待总结缓冲，
+        // 不依赖"以后某条群消息恰好触发摘要"，避免窗口重置造成话题断层。
+        size_t max_rounds = static_cast<size_t>(cfg_get()->max_history_rounds);
+        if (max_rounds < 4) max_rounds = 4;
+        if (max_rounds > 20) max_rounds = 20;
 
-        std::lock_guard<std::mutex> lock(memory_mutex_);
-        auto& q = recent_sessions_[context_id];
-        q.push_back({"user", user_prompt});
-        q.push_back({"assistant", reply});
+        // 软上限：超出 2 轮缓冲才滚回目标窗口。
+        // 否则窗口一满，之后**每轮对话都会滚一次**——每次滚动既断前缀缓存、
+        // 又多一次归档动作。留 2 轮缓冲后约每 3~5 轮才滚一次。
+        const size_t soft_rounds = max_rounds + 2;
 
-        // 达到上限时**整体清空重启**，而不是滑动删头。
-        //
-        // 原因：前缀缓存只认「从头开始连续相同」的 token。滑动删头会让
-        // 下一次请求的开头变成 msg3...（而这次是 msg1...），前缀当场断裂，
-        // 缓存只剩 system 一段 —— 这正是命中率只有 20% 的元凶。
-        //
-        // 整体清空 + 保留最近 2 轮，让新的一段重新建立稳定前缀：
-        //   前 N 轮历史只增不删 → 每次都能命中上一次的全部内容
-        //   每攒满一次才损失一次缓存，频率远低于滑动
-        // 上下文不丢：老对话已经进了长期记忆摘要。
-        if (q.size() > max_lines) {
-            std::deque<ChatMessage> keep;
-            size_t keep_n = 4;                       // 保留最近 2 轮
-            if (keep_n > max_lines / 2) keep_n = max_lines / 2;   // 不超过窗口一半
-            if (keep_n < 2) keep_n = 2;
-            if (keep_n > q.size()) keep_n = q.size();
-            size_t start = q.size() - keep_n;
-            if (start % 2 != 0) ++start;             // 对齐到 user 开头
-            for (size_t i = start; i < q.size(); ++i) keep.push_back(q[i]);
-            q.swap(keep);
-            file_log("[AIClient] 历史窗口已满，重新开始记录（前缀缓存重新建立）");
+        std::deque<ChatMessage> archived;
+        {
+            std::lock_guard<std::mutex> lock(memory_mutex_);
+            auto& q = recent_sessions_[context_id];
+            q.push_back({"user", user_prompt});
+            q.push_back({"assistant", reply});
+            if (q.size() > soft_rounds * 2) {
+                archived = trim_recent_history(q, max_rounds);
+            }
+        }
+
+        // 归档走 observe()：复用「攒够 memory_batch_size 条才总结」的批量逻辑。
+        // 直接 enqueue_summarize 会让窗口满了之后**每轮对话都触发一次 AI 总结**，
+        // 调用量直接翻倍，而每次只总结 2 条，效率极低。
+        for (const auto& msg : archived) {
+            std::string line;
+            if (msg.role == "assistant") {
+                line = "【我】: " + msg.content;
+            } else if (!msg.content.empty() && msg.content.rfind("【", 0) == 0) {
+                line = msg.content;          // 原文已带【群成员 昵称(QQ:x)】标记，别再套一层
+            } else {
+                line = "【近期对话】: " + msg.content;
+            }
+            observe(context_id, line);       // 内部会自己加锁，必须在锁外调用
+        }
+        if (!archived.empty()) {
+            file_log("[AIClient] 历史窗口滚动 " + std::to_string(archived.size()) +
+                     " 条旧对话，已进入长期记忆待总结队列: " + context_id);
         }
     }
 
