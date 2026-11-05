@@ -9,7 +9,7 @@
         "max_history_rounds": 10,
         "max_tokens": 1000,
         "memory_batch_size": 8,
-        "memory_max_chars": 1000,
+        "memory_max_chars": 10000,
         "model": "deepseek-flash",
         "reply_cooldown_sec": 45,
         "system_prompt": "",

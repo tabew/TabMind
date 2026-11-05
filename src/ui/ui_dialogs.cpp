@@ -241,7 +241,7 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
         mk_label(hwnd, L"🧠  长期记忆", 24, 122, 300, 22, ctx->f_section);
 
-        mk_label(hwnd, L"记忆上限 (字)", 24, 156, 120, 20, ctx->f_small);
+        mk_label(hwnd, L"记忆上限 (1000-10000 字)", 24, 156, 180, 20, ctx->f_small);
         mk_edit(hwnd, IDC_ADV_MEM_CHARS, std::to_wstring(ai.memory_max_chars), ed_x, 152, ed_w, 26, ES_NUMBER, ctx->f_body);
 
         mk_label(hwnd, L"简写阈值 (条)", 268, 156, 100, 20, ctx->f_small);
@@ -339,7 +339,7 @@ LRESULT CALLBACK adv_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             ai.max_tokens         = to_int(text_of(GetDlgItem(hwnd, IDC_ADV_TOKENS)), ai.max_tokens);
             ai.max_history_rounds = to_int(text_of(GetDlgItem(hwnd, IDC_ADV_ROUNDS)), ai.max_history_rounds);
             ai.reply_cooldown_sec = to_int(text_of(GetDlgItem(hwnd, IDC_ADV_COOLDOWN)), ai.reply_cooldown_sec);
-            ai.memory_max_chars   = to_int(text_of(GetDlgItem(hwnd, IDC_ADV_MEM_CHARS)), ai.memory_max_chars);
+            ai.memory_max_chars   = std::max(1000, std::min(10000, to_int(text_of(GetDlgItem(hwnd, IDC_ADV_MEM_CHARS)), ai.memory_max_chars)));
             ai.memory_batch_size  = to_int(text_of(GetDlgItem(hwnd, IDC_ADV_MEM_BATCH)), ai.memory_batch_size);
             ai.vision_model       = text_of(GetDlgItem(hwnd, IDC_ADV_VISION));
 

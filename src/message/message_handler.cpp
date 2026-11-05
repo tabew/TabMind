@@ -609,7 +609,7 @@ void MessageHandler::process_message_event(const nlohmann::json& event) {
 
         // 私聊消息全量入记忆（observe 内部异步简写）
         {
-            std::string mem_line = "【" + sender_name + "】: " + (raw_text.empty() ? (image_paths.empty() ? "（空）" : "[图片]") : raw_text);
+            std::string mem_line = "【" + sender_name + "(QQ:" + std::to_string(user_id) + ")】: " + (raw_text.empty() ? (image_paths.empty() ? "（空）" : "[图片]") : raw_text);
             ai_client_.observe(context_id, mem_line);
         }
 
@@ -625,7 +625,7 @@ void MessageHandler::process_message_event(const nlohmann::json& event) {
 
         // ---------- 群聊全量消息一律写入记忆（即使不回复；简写在后台） ----------
         {
-            std::string mem_line = "【" + sender_name + "】: " + (raw_text.empty() ? (image_paths.empty() ? "（空）" : "[图片]") : raw_text);
+            std::string mem_line = "【" + sender_name + "(QQ:" + std::to_string(user_id) + ")】: " + (raw_text.empty() ? (image_paths.empty() ? "（空）" : "[图片]") : raw_text);
             ai_client_.observe(context_id, mem_line);
         }
 

@@ -1,4 +1,5 @@
 #pragma once
+#include <algorithm>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -55,8 +56,9 @@ struct AIConfig {
     // 短期上下文轮数。窗口越大，前缀前缀缓存命中越久（命中部分价格只有
     // 未命中的 1/50，多带历史几乎不花钱）；太小则频繁"清空重启"，命中率崩。
     int max_history_rounds = 15;
-    // 长期记忆简写上限（字，按 Unicode 字符计）
-    int memory_max_chars = 1000;
+    // 长期记忆简写上限（字，按 Unicode 字符计）。
+    // 群聊按成员分节保存，需要足够空间容纳不同人的偏好与关系。
+    int memory_max_chars = 10000;
     // 攒够多少条新消息后触发一次自动简写
     int memory_batch_size = 8;
     // 看完/记完本地图片后自动删除，节省磁盘
@@ -133,7 +135,13 @@ struct AppConfig {
                 if (ai.contains("temperature")) config.ai.temperature = ai["temperature"].get<float>();
                 if (ai.contains("max_tokens")) config.ai.max_tokens = ai["max_tokens"].get<int>();
                 if (ai.contains("max_history_rounds")) config.ai.max_history_rounds = ai["max_history_rounds"].get<int>();
-                if (ai.contains("memory_max_chars")) config.ai.memory_max_chars = ai["memory_max_chars"].get<int>();
+                                if (ai.contains("memory_max_chars")) {
+                    config.ai.memory_max_chars = ai["memory_max_chars"].get<int>();
+                    // 旧版本默认 1000；升级到分人群记忆后自动提升旧默认值，
+                    // 用户主动设置的其他容量不受影响。
+                    if (config.ai.memory_max_chars == 1000) config.ai.memory_max_chars = 10000;
+                    config.ai.memory_max_chars = std::max(1000, std::min(10000, config.ai.memory_max_chars));
+                }
                 if (ai.contains("memory_batch_size")) config.ai.memory_batch_size = ai["memory_batch_size"].get<int>();
                 if (ai.contains("auto_delete_images")) config.ai.auto_delete_images = ai["auto_delete_images"].get<bool>();
                 if (ai.contains("close_friends")) config.ai.close_friends = ai["close_friends"].get<std::vector<std::string>>();
