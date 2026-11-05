@@ -1,5 +1,6 @@
 #pragma once
 #include <string>
+#include <cstring>
 #include <vector>
 #include <deque>
 #include <unordered_map>
@@ -12,6 +13,60 @@
 #include "config.hpp"
 #include "simple_json.hpp"
 
+// 可独立测试的长期记忆存储策略。
+namespace MemoryPolicy {
+inline std::string retain_latest(const std::string& s, size_t max_chars) {
+    size_t total = 0;
+    for (unsigned char c : s) {
+        if ((c & 0xC0) != 0x80) ++total;
+    }
+    if (total <= max_chars) return s;
+    size_t keep = 0, i = s.size();
+    while (i > 0 && keep < max_chars) {
+        --i;
+        while (i > 0 && (static_cast<unsigned char>(s[i]) & 0xC0) == 0x80) --i;
+        ++keep;
+    }
+    if (i == 0) return s;
+
+    // 按字符截断经常落在句子中间，开头会变成「主，喜欢猫」这种半句 ——
+    // 模型读到会理解错。这里从截断点往后找最近的断句符，让摘要从完整句子开始。
+    // 往后最多看 60 字节（约 20 个汉字），找不到就保持原样（宁可半句也不丢内容）。
+    static const char* const kBreaks[] = {
+        "\n",
+        "\xE3\x80\x82",   // 。
+        "\xEF\xBC\x81",   // ！
+        "\xEF\xBC\x9F",   // ？
+        "\xEF\xBC\x9B",   // ；
+    };
+    // 先看截断点是不是正好落在句子开头（前一个字符就是断句符 / 换行）。
+    // 是的话直接用它 —— 否则会把已经完整的句子再砍掉一截。
+    if (i > 0) {
+        bool at_sentence_start = (s[i - 1] == '\n' || s[i - 1] == ' ');
+        if (!at_sentence_start && i >= 3) {
+            std::string prev = s.substr(i - 3, 3);
+            for (const char* b : kBreaks) {
+                if (std::strlen(b) == 3 && prev == b) { at_sentence_start = true; break; }
+            }
+        }
+        if (at_sentence_start) return s.substr(i);
+    }
+
+    size_t window_end = i + 60;
+    if (window_end > s.size()) window_end = s.size();
+    size_t best = std::string::npos;
+    for (const char* b : kBreaks) {
+        size_t bl = std::strlen(b);
+        size_t pos = s.find(b, i);
+        if (pos != std::string::npos && pos + bl <= window_end) {
+            size_t after = pos + bl;
+            if (best == std::string::npos || after < best) best = after;
+        }
+    }
+    if (best != std::string::npos && best < s.size()) return s.substr(best);
+    return s.substr(i);
+}
+}
 struct ChatMessage {
     std::string role;    // "system", "user", "assistant"
     std::string content;
@@ -135,7 +190,8 @@ private:
                                   const std::vector<std::string>& new_lines);
     void enqueue_summarize(const std::string& context_id);
     void mem_worker_loop();
-    void do_summarize(const std::string& context_id);
+    // 返回 true = 成功（或无需处理）；false = 失败（调用方应退避重试）
+    bool do_summarize(const std::string& context_id);
 
     std::string last_error_;
 
