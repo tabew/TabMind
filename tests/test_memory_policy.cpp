@@ -4,6 +4,7 @@
 
 static void test_history_rolling();
 static void test_cache_friendly_archiving();
+static void test_summary_in_system();
 static int fails = 0;
 static void check(bool ok, const char* msg) {
     std::printf("%s %s\n", ok ? "PASS" : "FAIL", msg);
@@ -36,6 +37,7 @@ int main() {
     check(MemoryPolicy::retain_latest("aaa\nbbb\nccc", 7) == "bbb\nccc", "换行可作为断句点");
     test_history_rolling();
     test_cache_friendly_archiving();
+    test_summary_in_system();
     std::printf("\n结果: %s\n", fails == 0 ? "PASS 全部通过" : "FAIL");
     return fails == 0 ? 0 : 1;
 }
@@ -65,4 +67,39 @@ static void test_cache_friendly_archiving() {
     add_round(23);
     if (h.size() > soft_rounds * 2) AIClient::trim_recent_history(h, 15 / 2);
     check(h.size() == 14 && h.front().content == "问题17", "满窗后批量归档，保留最新完整轮次");
+}
+
+// 摘要必须在 system 末尾（而不是 user），且不能破坏「规则+人设」这段稳定前缀。
+static void test_summary_in_system() {
+    AIConfig cfg;
+    cfg.persona_prompt = "你是鲸鱼娘，爱吃白饭。";
+    cfg.system_prompt = "";
+    AIClient c(cfg);
+    std::deque<ChatMessage> hist;
+    std::string base = AIClient::compose_system_prompt(cfg);
+
+    auto m1 = c.build_messages(base, hist, "今天吃什么",
+                               "【成员｜小明｜QQ:123】\n喜欢猫，在准备考试。", true);
+    auto m2 = c.build_messages(base, hist, "晚上吃什么",
+                               "【成员｜小明｜QQ:123】\n喜欢猫，考试考完了。", false);
+
+    std::string s1 = m1[0]["content"].get<std::string>();
+    std::string s2 = m2[0]["content"].get<std::string>();
+    std::string u1 = m1[m1.size() - 1]["content"].get<std::string>();
+    std::string u2 = m2[m2.size() - 1]["content"].get<std::string>();
+
+    check(s1.rfind(base, 0) == 0, "system 以「规则+人设」开头");
+    check(s1.find("在准备考试") != std::string::npos, "摘要 A 在 system 里");
+    check(s2.find("考完了") != std::string::npos, "摘要 B 在 system 里");
+
+    // 两份 system 的共同前缀必须至少覆盖「规则+人设」——
+    // 这就是缓存能命中的保证：摘要变化只损失自身，不拖累前面。
+    size_t n = s1.size() < s2.size() ? s1.size() : s2.size();
+    size_t i = 0;
+    while (i < n && s1[i] == s2[i]) ++i;
+    check(i >= base.size(), "摘要变化时「规则+人设」前缀仍逐字节相同");
+
+    check(u1.find("是否该开口") != std::string::npos, "群聊插话规则仍在 user 里");
+    check(u1.find("喜欢猫") == std::string::npos, "user 里不再夹带摘要");
+    check(u2 == "晚上吃什么", "私聊无背景资料时 user 就是纯文本");
 }

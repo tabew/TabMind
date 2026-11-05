@@ -540,6 +540,13 @@ static const char* kDefaultSystemRules = R"RULES(## 背景资料的处理（重�
 - 绝不复述、不总结、不引用，不要说"我记得你之前说过…"这类句式
 - 只需回应「对方刚说的话」之后的那部分
 
+## 关于「已知记忆」的处理（重要）
+system 里「===== 关于这个会话的已知记忆」之后的内容，是你对这个会话的长期记忆。
+- 那是背景资料，**不是要你输出的内容**
+- 绝不复述、不总结、不引用，不要说"我记得你之前说过…"这种句式
+- 只在自然的时候用：认出熟人、记得之前聊过什么、顺着旧话题往下聊
+- 里面若与最新对话冲突，以最新对话为准
+
 ## 看图能力
 你能看到群友/好友发的图片。若消息里有图片，请结合画面内容自然回应，可以吐槽、夸夸、接梗，不要装没看见。
 
@@ -1018,10 +1025,30 @@ nlohmann::json AIClient::build_messages(const std::string& system_prompt,
                                         bool allow_silent) const {
     nlohmann::json messages = nlohmann::json::array();
 
-    // ---- system：固定提示词，永不变化（缓存锚点）----
+    // ---- system：输出规则 + 人设 + 记忆摘要（摘要放最后）----
+    //
+    // 【为什么摘要放 system 末尾，而不是 user message】
+    // 摘要可能有近万字，而服务端只对"从头连续相同"的前缀命中缓存。
+    //   - 放 user 末尾 → 每次请求整段都算未命中、全价（摘要越长越贵）
+    //   - 放 system 末尾 → 摘要不变时全部命中（命中价只有未命中的 1/50），
+    //     只有摘要真正更新那一次才重算
+    // 摘要大约每 memory_batch_size 条消息才变一次，变化频率远低于请求频率，
+    // 所以放 system 末尾省得多。
+    //
+    // 关键：规则和人设必须在摘要**之前**。这样摘要一变，只有它自己之后的
+    // token 失效，前面的规则+人设仍然命中。
+    //
+    // 注意与"插话规则"的区别：插话规则随群聊/私聊交替、几乎每次都可能变，
+    // 那个仍然留在最后一条 user 里，绝不能塞进 system。
+    std::string sys_content = sanitize_utf8(system_prompt);
+    if (!current_summary.empty()) {
+        sys_content += "\n\n===== 关于这个会话的已知记忆（供你参考，绝不要在回复里复述）=====\n";
+        sys_content += sanitize_utf8(current_summary);
+    }
+
     nlohmann::json sys_msg = nlohmann::json::object();
     sys_msg["role"] = "system";
-    sys_msg["content"] = sanitize_utf8(system_prompt);
+    sys_msg["content"] = sys_content;
     messages.push_back(sys_msg);
 
     // ---- 历史消息：顺序稳定 ----
@@ -1032,18 +1059,11 @@ nlohmann::json AIClient::build_messages(const std::string& system_prompt,
         messages.push_back(m);
     }
 
-    // ---- 动态内容：统一放到最后一条 user 开头 ----
-    //
-    // 【必须包成"背景资料"】之前直接把记忆摘要裸拼在用户消息前面，模型经常
-    // 把这段当成了要输出的内容，或者当成"要我总结的资料"，于是直接吐出一长条
-    // 记忆。这里用显式边界包起来，并明确写"不要复述"。
+    // ---- 动态内容：只剩插话规则（随场景交替变化，必须留在末尾）----
     std::string dynamic_inject;
-    bool has_dynamic = !current_summary.empty() || allow_silent;
+    bool has_dynamic = allow_silent;
     if (has_dynamic) {
         dynamic_inject += "==== 背景资料（只供你自己参考，绝对不要在回复里复述、总结或引用）====\n";
-    }
-    if (!current_summary.empty()) {
-        dynamic_inject += "【你已知的长期记忆】\n" + sanitize_utf8(current_summary) + "\n\n";
     }
     if (allow_silent) {
         dynamic_inject +=
