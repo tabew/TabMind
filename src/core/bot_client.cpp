@@ -1,6 +1,6 @@
 #include "bot_client.hpp"
-#include "ui_core.hpp"
-#include "ui_window.hpp"
+#include "platform.hpp"
+#include "text_util.hpp"
 #include "simple_json.hpp"
 #include <iostream>
 #include <filesystem>
@@ -36,9 +36,8 @@ static std::string transform_cq_image_paths(const std::string& text) {
 }
 
 static void log_info(const std::string& msg) {
-    std::cout << msg << std::endl;
-    file_log(msg);                       // 服务器上没有控制台，靠文件看日志
-    MainWindow::get_instance().log(msg);
+    // 平台层负责：stdout + logs/app.log（Windows 额外推送到 UI 日志面板）
+    platform::log(msg);
 }
 
 BotClient::BotClient(const AppConfig& config)
@@ -82,7 +81,7 @@ static std::string qzone_stamp_path() { return "data/qzone_last.txt"; }
 static std::string today_str() {
     std::time_t tt = std::time(nullptr);
     std::tm tm{};
-    localtime_s(&tm, &tt);
+    platform::localtime_safe(tm, tt);
     char buf[32];
     strftime(buf, sizeof(buf), "%Y-%m-%d", &tm);
     return buf;
@@ -163,10 +162,7 @@ void BotClient::post_qzone_now() {
         return;
     }
     // 粗暴去模型偶尔加的引号/前缀
-    while (!content.empty() && (content.front() == ' ' || content.front() == '\n' ||
-                                content.front() == '"'  || content.front() == '\u300c')) content.erase(content.begin());
-    while (!content.empty() && (content.back() == ' '  || content.back() == '\n' ||
-                                content.back() == '"'  || content.back() == '\u300d')) content.pop_back();
+    textutil::strip_wrapping_quotes(content);
     send_qzone(content, {}, config_.onebot.qzone_ugc_right);
 }
 
@@ -183,7 +179,7 @@ void BotClient::qzone_loop() {
         if (!qzone_running_ || !config_.onebot.qzone_daily) continue;
         std::time_t tt = std::time(nullptr);
         std::tm tm{};
-        localtime_s(&tm, &tt);
+        platform::localtime_safe(tm, tt);
         if (tm.tm_hour != config_.onebot.qzone_hour) continue;
         if (tm.tm_min != config_.onebot.qzone_minute) continue;
         if (qzone_already_posted_today()) {

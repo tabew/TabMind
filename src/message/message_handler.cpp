@@ -1,8 +1,8 @@
 #include "message_handler.hpp"
 #include "plugin_manager.hpp"
+#include "platform.hpp"
 #include "simple_json.hpp"
 #include "simple_http.hpp"
-#include "ui_window.hpp"
 #include <iostream>
 #include <fstream>
 #include <sstream>
@@ -183,7 +183,7 @@ void MessageHandler::async_send_file(const char* message_type, int64_t target_id
 }
 
 void MessageHandler::async_log(const char* text) {
-    if (text) MainWindow::get_instance().log(text);
+    if (text) platform::log(text);
 }
 
 void MessageHandler::fill_async_callbacks(PluginContext& pctx) {
@@ -269,14 +269,14 @@ void MessageHandler::worker_loop() {
             process_ai_task(task);
         } catch (const std::exception& e) {
             std::string err_msg = "【AI 处理异常】" + std::string(e.what());
-            MainWindow::get_instance().log("❌ " + err_msg);
+            platform::log("❌ " + err_msg);
             try {
                 if (send_reply_ && task.force_reply) {
                     send_reply_(task.message_type, task.target_id, "呜呜...塔菲的大脑刚刚短路了喵（错误：" + std::string(e.what()) + "）");
                 }
             } catch (...) {}
         } catch (...) {
-            MainWindow::get_instance().log("❌ AI 处理遇到未知异常。");
+            platform::log("❌ AI 处理遇到未知异常。");
         }
     }
 }
@@ -293,7 +293,7 @@ void MessageHandler::process_ai_task(const AITask& task) {
     pctx.is_at_bot = task.is_at_bot;
     pctx.send_reply = send_reply_;
     pctx.send_file = send_file_;
-    pctx.log = [](const std::string& msg) { MainWindow::get_instance().log(msg); };
+    pctx.log = [](const std::string& msg) { platform::log(msg); };
     fill_async_callbacks(pctx);
 
     // 调用 AI 生成回复；非强制时允许模型自主沉默
@@ -302,7 +302,7 @@ void MessageHandler::process_ai_task(const AITask& task) {
 
     // 自主判断：决定不说话（用户消息已在 process_message_event 写入记忆）
     if (reply.empty()) {
-        MainWindow::get_instance().log("💤 自主判断暂不回复 [" + task.message_type + " " + std::to_string(task.target_id) + "]");
+        platform::log("💤 自主判断暂不回复 [" + task.message_type + " " + std::to_string(task.target_id) + "]");
         if (config_.ai.auto_delete_images) {
             remove_local_images(task.image_paths);
         }
@@ -566,7 +566,7 @@ void MessageHandler::process_message_event(const nlohmann::json& event) {
     pctx.is_at_bot = is_at_bot;
     pctx.send_reply = send_reply_;
     pctx.send_file = send_file_;
-    pctx.log = [](const std::string& msg) { MainWindow::get_instance().log(msg); };
+    pctx.log = [](const std::string& msg) { platform::log(msg); };
     fill_async_callbacks(pctx);
 
     // =========================================================================

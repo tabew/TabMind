@@ -3,8 +3,15 @@
 #include <vector>
 #include <functional>
 #include <memory>
-#include <windows.h>
 #include "simple_json.hpp"
+
+// 动态库句柄类型：Windows 用 HMODULE，POSIX 用 dlopen 返回的 void*
+#ifdef _WIN32
+#include <windows.h>
+using PluginModuleHandle = HMODULE;
+#else
+using PluginModuleHandle = void*;
+#endif
 
 // 线程安全的 C 回调（插件可保存到后台线程调用；宿主保证任意线程安全）
 using PluginAsyncSendReplyFn = void(*)(void* user_data, const char* message_type, int64_t target_id, const char* text);
@@ -102,7 +109,7 @@ private:
     ~PluginManager();
 
     struct LoadedPlugin {
-        HMODULE h_module = nullptr;
+        PluginModuleHandle h_module = nullptr;
         IBotPlugin* instance = nullptr;
         DestroyPluginFunc destroy_func = nullptr;
         PluginInfo info;

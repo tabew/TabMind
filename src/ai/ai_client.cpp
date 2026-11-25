@@ -1,5 +1,6 @@
 #include "ai_client.hpp"
-#include "ui_core.hpp"
+#include "platform.hpp"
+#include "text_util.hpp"
 #include "simple_http.hpp"
 #include "simple_json.hpp"
 #include <iostream>
@@ -246,7 +247,6 @@ AIClient::AIClient(const AIConfig& config)
     : cfg_(std::make_shared<AIConfig>(config)) {
     parse_base_url(cfg_get()->base_url);
     load_summaries_from_disk();
-    mem_thread_ = std::thread(&AIClient::mem_worker_loop, this);
 
     // 启动时检查 API Key，避免上线后才发现 401
     if (cfg_get()->api_key.empty()
@@ -259,23 +259,11 @@ AIClient::AIClient(const AIConfig& config)
 }
 
 AIClient::~AIClient() {
-    mem_running_ = false;
-    mem_cv_.notify_all();
-    if (mem_thread_.joinable()) {
-        mem_thread_.join();
-    }
-    // 退出前尽量把缓冲简写掉（同步、仅一次）
+    // 【故意不在退出时补总结】
+    // 以前的版本会在析构里把所有缓冲统统总结一遍，结果是每重启一次
+    // （改配置、更新代码、systemd 重启）就白烧一大串 API 调用。
+    // 未总结的原始消息只活在内存里，丢了就丢了 —— 比起每次重启烧钱，这个代价可以接受。
     try {
-        std::vector<std::string> ids;
-        {
-            std::lock_guard<std::mutex> lock(memory_mutex_);
-            for (const auto& kv : memory_buffer_) {
-                if (!kv.second.empty()) ids.push_back(kv.first);
-            }
-        }
-        for (const auto& id : ids) {
-            do_summarize(id);
-        }
         save_summaries_to_disk();
     } catch (...) {}
 }
@@ -822,66 +810,31 @@ std::string AIClient::call_model(const std::string& model, const nlohmann::json&
 
 void AIClient::observe(const std::string& context_id, const std::string& line) {
     if (line.empty()) return;
-    bool should_queue = false;
+    // 【只记账，不打模型】
+    // 以前这里攒够 memory_batch_size 条就丢给后台线程总结，
+    // 于是"没人跟机器人说话的热闹群"也会每 8 条消息烧一次 API —— 这是最大的浪费来源。
+    // 现在只入本地缓冲（零 token），等真的要回复了再去总结（见 summarize_pending_before_reply）。
+    std::lock_guard<std::mutex> lock(memory_mutex_);
+    auto& buf = memory_buffer_[context_id];
+    buf.push_back(line);
+    // 缓冲本身也限长，防止长期不回复时无限膨胀
+    while (buf.size() > 80) buf.pop_front();
+}
+
+// 仅在「即将调用模型回复」时执行：缓冲够一批就总结一批。
+// 每次最多一批，不追赶积压 —— 积压很多时宁可少记一点也不多花钱。
+void AIClient::summarize_pending_before_reply(const std::string& context_id) {
+    bool should = false;
     {
         std::lock_guard<std::mutex> lock(memory_mutex_);
-        auto& buf = memory_buffer_[context_id];
-        buf.push_back(line);
-        // 缓冲本身也限长，防止简写前膨胀
-        while (buf.size() > 80) buf.pop_front();
+        auto it = memory_buffer_.find(context_id);
         int need = cfg_get()->memory_batch_size > 0 ? cfg_get()->memory_batch_size : 8;
-        should_queue = static_cast<int>(buf.size()) >= need;
+        should = (it != memory_buffer_.end()) && static_cast<int>(it->second.size()) >= need;
     }
-    // 攒够 → 丢给后台线程简写，绝不阻塞当前消息/回复
-    if (should_queue) {
-        enqueue_summarize(context_id);
-    }
-}
-
-void AIClient::enqueue_summarize(const std::string& context_id) {
-    {
-        std::lock_guard<std::mutex> lock(mem_task_mutex_);
-        if (mem_queued_.count(context_id)) return;
-        mem_queued_.insert(context_id);
-        mem_pending_.push_back(context_id);
-    }
-    mem_cv_.notify_one();
-}
-
-void AIClient::mem_worker_loop() {
-    int backoff_sec = 0;
-    while (mem_running_) {
-        std::string ctx;
-        {
-            std::unique_lock<std::mutex> lock(mem_task_mutex_);
-            mem_cv_.wait(lock, [this]() {
-                return !mem_running_ || !mem_pending_.empty();
-            });
-            if (!mem_running_ && mem_pending_.empty()) break;
-            if (mem_pending_.empty()) continue;
-            ctx = mem_pending_.front();
-            mem_pending_.pop_front();
-            mem_queued_.erase(ctx);
-        }
-        bool ok = true;
-        try {
-            ok = do_summarize(ctx);
-        } catch (...) {
-            ok = false;
-        }
-        if (!ok) {
-            // 失败退避：10s 起、翻倍、最多 5 分钟。
-            // 否则 API Key 过期/断网时这里会疯狂重试，既刷日志又可能烧额度。
-            backoff_sec = (backoff_sec == 0) ? 10 : std::min(backoff_sec * 2, 300);
-            file_log("[AIClient] 记忆总结失败，冷却 " + std::to_string(backoff_sec) +
-                     " 秒后重试（连续失败会继续翻倍，最多 5 分钟）");
-            for (int i = 0; i < backoff_sec && mem_running_; ++i) {
-                std::this_thread::sleep_for(std::chrono::seconds(1));
-            }
-        } else {
-            backoff_sec = 0;
-        }
-    }
+    if (!should) return;
+    try {
+        do_summarize(context_id);
+    } catch (...) {}
 }
 
 bool AIClient::do_summarize(const std::string& context_id) {
@@ -916,9 +869,8 @@ bool AIClient::do_summarize(const std::string& context_id) {
             while (buf.size() > 80) buf.pop_front();   // 上限保护
         }
         file_log("[AIClient] 长期记忆总结失败，本批 " + std::to_string(batch.size()) +
-                 " 条已放回缓冲等待重试: " + context_id);
-        // 重新排队（worker 收到失败会先退避，不会变成死循环）
-        enqueue_summarize(context_id);
+                 " 条已放回缓冲: " + context_id);
+        // 不再后台重试：本批已放回缓冲，等下一条要回复的消息再试（见 summarize_pending_before_reply）
         return false;
     }
 
@@ -931,16 +883,7 @@ bool AIClient::do_summarize(const std::string& context_id) {
         write_memory_txt(context_id, new_summary, maxc);
     }
     // batch 已在开头从缓冲区移除，这里不需要再清空。
-
-    // 若请求期间又攒够了一批，继续排队；去重逻辑会避免重复任务。
-    bool more = false;
-    {
-        std::lock_guard<std::mutex> lock(memory_mutex_);
-        auto it = memory_buffer_.find(context_id);
-        int need = cfg_get()->memory_batch_size > 0 ? cfg_get()->memory_batch_size : 8;
-        more = it != memory_buffer_.end() && static_cast<int>(it->second.size()) >= need;
-    }
-    if (more) enqueue_summarize(context_id);
+    // 剩下的消息留在缓冲里，等下一次真正要回复时再总结（不主动追赶积压）。
     return true;
 }
 
@@ -1003,12 +946,7 @@ std::string AIClient::summarize_context(const std::string& context_id,
     // 简写用更保守的采样
     std::string result = call_model(cfg_get()->model, messages, 800, 0.3f, false);
     // 兜底：去掉可能的引号/前缀
-    while (!result.empty() && (result.front() == ' ' || result.front() == '\n' || result.front() == '"' || result.front() == '「')) {
-        result.erase(result.begin());
-    }
-    while (!result.empty() && (result.back() == ' ' || result.back() == '\n' || result.back() == '"' || result.back() == '」')) {
-        result.pop_back();
-    }
+    textutil::strip_wrapping_quotes(result);
     return result;
 }
 
@@ -1117,6 +1055,11 @@ std::string AIClient::chat(const std::string& context_id, const std::string& use
                            const std::vector<std::string>& image_paths,
                            bool allow_silent) {
     std::lock_guard<std::mutex> chat_lock(chat_mutex_);
+
+    // 【按需总结】真正的"要不要回复"已经由上层判定过了（@ / 前缀 / 私聊 / 插件放行）。
+    // 只有在走到这里（马上要调用模型）时，才把攒下的群聊消息总结进长期记忆。
+    // 这样无人理会的群一条 API 都不会调用；有回复时最多多花一批总结的钱。
+    summarize_pending_before_reply(context_id);
 
     std::string current_summary;
     std::deque<ChatMessage> recent_msgs;

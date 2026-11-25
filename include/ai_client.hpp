@@ -174,13 +174,10 @@ private:
     mutable std::mutex memory_mutex_;
     std::mutex chat_mutex_;
 
-    // 后台记忆简写线程（绝不挡回复）
-    std::thread mem_thread_;
-    std::mutex mem_task_mutex_;
-    std::condition_variable mem_cv_;
-    std::deque<std::string> mem_pending_;          // 待简写的 context_id
-    std::unordered_set<std::string> mem_queued_;   // 去重
-    std::atomic<bool> mem_running_{true};
+    // 【按需总结】不再有后台简写线程。
+    // observe() 只把消息塞进 memory_buffer_（纯本地、零 token），
+    // 真正调用模型做总结只发生在 chat() 即将回复之前。
+    // 这样「没人 @ 机器人的群」一条消息都不会产生 API 调用。
 
     void parse_base_url(const std::string& url);
     std::string send_http_request(const std::string& req_body);
@@ -192,10 +189,10 @@ private:
     std::string summarize_context(const std::string& context_id,
                                   const std::string& old_summary,
                                   const std::vector<std::string>& new_lines);
-    void enqueue_summarize(const std::string& context_id);
-    void mem_worker_loop();
-    // 返回 true = 成功（或无需处理）；false = 失败（调用方应退避重试）
+    // 返回 true = 成功（或无需处理）；false = 失败（下一条要回复的消息会再试）
     bool do_summarize(const std::string& context_id);
+    // 按需总结：仅在即将回复时调用，最多消耗一批（不追赶积压）
+    void summarize_pending_before_reply(const std::string& context_id);
 
     std::string last_error_;
 

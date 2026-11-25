@@ -6,6 +6,7 @@
 #include <iostream>
 #include <algorithm>
 #include <cctype>
+#include <cstdint>
 #include <initializer_list>
 
 
@@ -92,6 +93,13 @@ namespace simplejson {
         Value(int n) : type(TYPE_NUMBER), num_val(n), int_val(n) {}
         Value(int64_t n) : type(TYPE_NUMBER), num_val(static_cast<double>(n)), int_val(n) {}
         Value(double n) : type(TYPE_NUMBER), num_val(n), int_val(static_cast<int64_t>(n)) {}
+#if !defined(_WIN32)
+        // Linux 上 int64_t 是 long，与 long long 是两个不同类型。
+        // 插件常把 atoll/strtoll 的返回值直接赋给 Value，缺这个重载会产生
+        // 「转换到 Value 有歧义」的编译错误。MSVC 上两者同类型，不需要。
+        Value(long long n)
+            : type(TYPE_NUMBER), num_val(static_cast<double>(n)), int_val(static_cast<int64_t>(n)) {}
+#endif
         Value(const char* s) : type(TYPE_STRING), str_val(s ? s : "") {}
         Value(const std::string& s) : type(TYPE_STRING), str_val(s) {}
 
@@ -250,6 +258,17 @@ namespace simplejson {
     template<> inline bool Value::get<bool>() const { return is_boolean() ? bool_val : false; }
     template<> inline int Value::get<int>() const { return is_number() ? static_cast<int>(int_val) : 0; }
     template<> inline int64_t Value::get<int64_t>() const { return is_number() ? int_val : 0; }
+#if !defined(_WIN32)
+    // Linux 上 int64_t 是 long，与 long long 是两个不同类型。
+    // 插件里若写 get<long long>()（例如接收 atoll 的结果）会找不到特化，
+    // 链接期就会报 undefined symbol，这里补一个等价实现。
+    template<> inline long long Value::get<long long>() const {
+        return is_number() ? static_cast<long long>(int_val) : 0LL;
+    }
+    template<> inline unsigned long long Value::get<unsigned long long>() const {
+        return is_number() ? static_cast<unsigned long long>(int_val) : 0ULL;
+    }
+#endif
     template<> inline float Value::get<float>() const { return is_number() ? static_cast<float>(num_val) : 0.0f; }
     template<> inline double Value::get<double>() const { return is_number() ? num_val : 0.0; }
     template<> inline std::vector<std::string> Value::get<std::vector<std::string>>() const {

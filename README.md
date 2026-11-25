@@ -24,12 +24,14 @@
 
 ## 环境要求
 
-| 项目 | 要求 |
-|---|---|
-| 系统 | Windows 10 / 11 x64 |
-| 编译器 | Visual Studio 2022（v143 工具集）+ Windows SDK 10 |
-| 协议端 | [NapCat](https://github.com/NapNeko/NapCatQQ) / LLOneBot / Lagrange（任一，需开启正向 WebSocket） |
-| 依赖 | 无（仅 Windows 系统库：`winhttp`、`ws2_32`、`gdiplus` 等） |
+同一套源码支持两个构建目标：
+
+| 平台 | 形态 | 工具链 | 依赖 |
+|---|---|---|---|
+| Windows | 图形界面单窗口程序 | Visual Studio 2022（v143）+ Windows SDK 10 | 无（仅系统库 `winhttp`、`ws2_32`、`gdiplus` 等） |
+| Linux | 无头服务端（无 GUI） | GCC ≥ 11 / CMake ≥ 3.16 | `libcurl4-openssl-dev`、`libdl` |
+
+协议端通用：[NapCat](https://github.com/NapNeko/NapCatQQ) / LLOneBot / Lagrange（任一，需开启正向 WebSocket）。
 
 ---
 
@@ -75,6 +77,73 @@ link /SUBSYSTEM:WINDOWS /OUT:TabMind.exe *.obj ^
 
 ---
 
+## Linux 部署（无头服务端）
+
+Linux 目标不编译 `src/ui/`（没有图形环境），所有配置都写在 `config.json` 里；
+日志同时输出到 stdout 和 `logs/app.log`（单文件 8MB 自动轮转，方便 `journalctl` / `tail` 直接看）。
+
+### 1. 安装依赖
+
+```bash
+sudo apt update
+sudo apt install -y build-essential cmake libcurl4-openssl-dev
+```
+
+### 2. 编译
+
+**方式 A：CMake**
+
+```bash
+cmake -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+# 产物：build/TabMind
+```
+
+**方式 B：g++ 直接编译**
+
+```bash
+g++ -std=c++17 -O2 -pthread -rdynamic -I include \
+    src/core/*.cpp src/ai/*.cpp src/message/*.cpp \
+    src/plugin/*.cpp src/platform/platform_linux.cpp \
+    -o tabmind -lcurl -ldl
+```
+
+> `-rdynamic` 不能省：插件通过 `dlsym` 查找宿主导出的符号，去掉会导致插件加载失败。
+
+### 3. 配置并启动
+
+```bash
+cp config.example.json config.json
+vi config.json      # 填 ai.api_key、onebot.ws_url、onebot.bot_qq
+./tabmind
+```
+
+### 4. 用 systemd 常驻
+
+```ini
+[Unit]
+Description=TabMind QQ Bot
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/tabmind
+ExecStart=/opt/tabmind/tabmind
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+```
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now tabmind
+journalctl -u tabmind -f
+```
+
+---
+
 ## 目录结构
 
 ```text
@@ -83,8 +152,9 @@ TabMind/
 │   ├── core/      main.cpp（入口）、bot_client.cpp（OneBot WebSocket 连接）
 │   ├── ai/        ai_client.cpp（大模型调用 / 记忆 / 多模态）
 │   ├── message/   message_handler.cpp（事件解析 / @门禁 / 插件派发 / AI 触发）
-│   ├── plugin/    plugin_manager.cpp（DLL 扫描加载 / 派发 / AI 钩子）
-│   └── ui/        ui_window.cpp（Win32 配置界面）
+│   ├── plugin/    plugin_manager.cpp（插件扫描加载 / 派发 / AI 钩子）
+│   ├── platform/  platform_win.cpp / platform_linux.cpp（日志、时间、目录等平台差异）
+│   └── ui/        ui_window.cpp（Win32 配置界面，仅 Windows 目标编译）
 ├── include/       公共头文件
 │   ├── simple_json.hpp / simple_http.hpp / simple_ws.hpp   ← 内置基础库
 │   └── ai_client.hpp / bot_client.hpp / config.hpp /
